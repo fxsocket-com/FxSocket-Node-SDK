@@ -378,6 +378,21 @@ A server-sent `error` frame (a bad timeframe, say) is data, not a transport
 failure, so it arrives on `streamError` — the `error` channel is reserved for a
 connection that dropped and could not be re-established.
 
+A `subscribe*()` call resolves once the request is written to the socket, not
+once the server has started feeding that topic. The server confirms the second
+step with a `subscribed` frame, so if you are about to trigger the very events
+you want to observe — placing an order and watching for its `trade` events —
+wait for that acknowledgement first:
+
+```ts
+const ready = new Promise<void>((resolve) => {
+  stream.once('subscribed', () => resolve());
+});
+await stream.subscribeTrades();
+await ready;
+// now place the order
+```
+
 Close the stream when you're done; `fx.close()` does not close streams.
 
 ```ts
