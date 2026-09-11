@@ -30,3 +30,6 @@ logs/
 .DS_Store
 .idea/
 .vscode/
+
+# Scratch space for review tooling
+.tmp_review/
