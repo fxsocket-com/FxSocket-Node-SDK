@@ -1,0 +1,32 @@
+# Build output
+dist/
+coverage/
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Caches
+.eslintcache
+.cache/
+.vitest/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

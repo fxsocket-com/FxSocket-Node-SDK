@@ -1,0 +1,83 @@
+{
+  "name": "fxsocket",
+  "version": "0.6.0",
+  "description": "Node.js / TypeScript SDK for the FxSocket API — MT4/MT5 account management, trading, and real-time streaming.",
+  "keywords": [
+    "fxsocket",
+    "metatrader",
+    "mt4",
+    "mt5",
+    "trading",
+    "forex",
+    "websocket",
+    "typescript"
+  ],
+  "homepage": "https://fxsocket.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fxsocket-com/FxSocket-Node-SDK.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fxsocket-com/FxSocket-Node-SDK/issues"
+  },
+  "license": "MIT",
+  "author": "FxSocket",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:live": "vitest run --config vitest.live.config.ts",
+    "check": "npm run lint && npm run typecheck && npm run test",
+    "prepublishOnly": "npm run clean && npm run check && npm run build"
+  },
+  "dependencies": {
+    "undici": "^6.21.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "@vitest/coverage-v8": "^2.1.8",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "tsup": "^8.3.5",
+    "tsx": "^4.23.13",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vitest": "^2.1.8"
+  }
+}
