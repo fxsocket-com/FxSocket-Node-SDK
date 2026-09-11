@@ -9,7 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { FxSocket } from 'fxsocket';
+import { FxSocket } from '@fxsocket/sdk';
 
 async function main(): Promise<void> {
   const fx = new FxSocket();

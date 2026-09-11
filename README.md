@@ -1,7 +1,7 @@
 # FxSocket Node.js SDK
 
-[![npm](https://img.shields.io/npm/v/fxsocket.svg)](https://www.npmjs.com/package/fxsocket)
-[![node](https://img.shields.io/node/v/fxsocket.svg)](https://www.npmjs.com/package/fxsocket)
+[![npm](https://img.shields.io/npm/v/%40fxsocket%2Fsdk.svg)](https://www.npmjs.com/package/@fxsocket/sdk)
+[![node](https://img.shields.io/node/v/%40fxsocket%2Fsdk.svg)](https://www.npmjs.com/package/@fxsocket/sdk)
 [![CI](https://github.com/fxsocket-com/FxSocket-Node-SDK/actions/workflows/ci.yml/badge.svg)](https://github.com/fxsocket-com/FxSocket-Node-SDK/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/fxsocket-com/FxSocket-Node-SDK/blob/main/LICENSE)
 
@@ -33,7 +33,7 @@ stream live updates over REST and WebSocket.
 ## Install
 
 ```bash
-npm install fxsocket
+npm install @fxsocket/sdk
 ```
 
 Requires Node.js 20 or newer.
@@ -41,7 +41,7 @@ Requires Node.js 20 or newer.
 ## Quickstart
 
 ```ts
-import { FxSocket } from 'fxsocket';
+import { FxSocket } from '@fxsocket/sdk';
 
 const fx = new FxSocket({ apiKey: 'fxs_live_…' }); // or set FXSOCKET_API_KEY
 
@@ -57,7 +57,7 @@ await fx.close();
 CommonJS works the same way:
 
 ```js
-const { FxSocket } = require('fxsocket');
+const { FxSocket } = require('@fxsocket/sdk');
 ```
 
 Every method returns a promise. There is no separate synchronous client — where
@@ -136,7 +136,7 @@ absent from lists, 404 by id and 401 at the terminal). Passing `accounts`
 implies `selected`.
 
 ```ts
-import { KeyScope } from 'fxsocket';
+import { KeyScope } from '@fxsocket/sdk';
 
 let key = await fx.readonlyKeys.create({ name: 'dashboard', accounts: [account] });
 console.log(key.key); // plaintext, returned on every read
@@ -461,7 +461,7 @@ Every failure rejects with a subclass of `FxSocketError`:
 | `ConnectionError` / `TimeoutError` | the request never completed                                        |
 
 ```ts
-import { AccountCapError, InsufficientBalanceError } from 'fxsocket';
+import { AccountCapError, InsufficientBalanceError } from '@fxsocket/sdk';
 
 try {
   await fx.accounts.create({ server: 'Demo', login: 1, password: '…' });
@@ -481,7 +481,7 @@ try {
 Dedicated private servers are managed through `fx.privateServers`:
 
 ```ts
-import { FxSocket, PrivateAccountStatus, SlotsFullError } from 'fxsocket';
+import { FxSocket, PrivateAccountStatus, SlotsFullError } from '@fxsocket/sdk';
 
 const fx = new FxSocket({ apiKey: 'fxs_live_…', verifyTerminalTls: false });
 
@@ -602,6 +602,7 @@ The two SDKs cover the same API and the same concepts. What differs:
 
 | Python                                     | Node                                                |
 | ------------------------------------------ | --------------------------------------------------- |
+| `fxsocket` on PyPI                         | `@fxsocket/sdk` on npm                              |
 | `Client` / `AsyncClient`                   | one promise-based `FxSocket` (`Client` is an alias) |
 | `TerminalClient` / `AsyncTerminalClient`   | `TerminalClient`                                    |
 | `Stream` / `AsyncStream`                   | `Stream` — async-iterable _and_ an `EventEmitter`   |

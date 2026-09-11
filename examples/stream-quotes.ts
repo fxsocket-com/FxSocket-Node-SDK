@@ -4,7 +4,7 @@
  * Run:  FXSOCKET_API_KEY=fxs_live_... npx tsx examples/stream-quotes.ts <account-id>
  */
 
-import { FxSocket } from 'fxsocket';
+import { FxSocket } from '@fxsocket/sdk';
 
 async function main(accountId: string): Promise<void> {
   const fx = new FxSocket();

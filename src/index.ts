@@ -5,7 +5,7 @@
  * per-account terminal REST and WebSocket streaming for MT4/MT5.
  *
  * ```ts
- * import { FxSocket } from 'fxsocket';
+ * import { FxSocket } from '@fxsocket/sdk';
  *
  * const fx = new FxSocket({ apiKey: 'fxs_live_…' });
  * const [account] = await fx.accounts.list();

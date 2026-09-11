@@ -84,7 +84,7 @@ function resolveApiKey(apiKey?: string): string {
  * The FxSocket client.
  *
  * ```ts
- * import { FxSocket } from 'fxsocket';
+ * import { FxSocket } from '@fxsocket/sdk';
  *
  * const fx = new FxSocket({ apiKey: 'fxs_live_…' });
  * for (const account of await fx.accounts.list()) {

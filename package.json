@@ -1,7 +1,7 @@
 {
-  "name": "fxsocket",
+  "name": "@fxsocket/sdk",
   "version": "0.6.0",
-  "description": "Node.js / TypeScript SDK for the FxSocket API — MT4/MT5 account management, trading, and real-time streaming.",
+  "description": "Node.js / TypeScript SDK for the FxSocket API \u2014 MT4/MT5 account management, trading, and real-time streaming.",
   "keywords": [
     "fxsocket",
     "metatrader",
@@ -22,6 +22,9 @@
   },
   "license": "MIT",
   "author": "FxSocket",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

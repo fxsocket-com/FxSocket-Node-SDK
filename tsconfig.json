@@ -9,7 +9,7 @@
     // The examples import the package by name, the way a consumer would.
     // Map it to the source so they type-check without a build first.
     "baseUrl": ".",
-    "paths": { "fxsocket": ["./src/index.ts"] },
+    "paths": { "@fxsocket/sdk": ["./src/index.ts"] },
 
     "strict": true,
     "noUncheckedIndexedAccess": true,
