@@ -36,6 +36,8 @@ which is why the version starts there rather than at 0.1.0.
   an alias.
 - Properties that are Python `@property` accessors (`hasTerminal`, `isFilled`,
   `allClosed`, …) are materialized as plain fields when a payload is decoded.
+- Node 20 is the floor: `Symbol.asyncDispose`, which backs `await using`, does
+  not exist on Node 18 (itself long past end of life).
 - Streams buffer events for a slow consumer and drop the oldest past
   `maxQueueSize` (10,000 by default), emitting a `lag` event, so a fast tick
   feed cannot grow memory without bound.

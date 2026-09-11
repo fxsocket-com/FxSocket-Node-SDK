@@ -36,7 +36,7 @@ stream live updates over REST and WebSocket.
 npm install fxsocket
 ```
 
-Requires Node.js 18.17 or newer.
+Requires Node.js 20 or newer.
 
 ## Quickstart
 
@@ -78,7 +78,7 @@ for (const account of await fx.accounts.list()) {
 ```
 
 `fx.close()` releases the connection pool and every terminal client the instance
-opened. On Node 20+ you can let the runtime do it:
+opened. You can also let the runtime do it:
 
 ```ts
 await using fx = new FxSocket({ apiKey: 'fxs_live_…' });
@@ -562,7 +562,8 @@ guarantee accidental. Retry deliberately, with an `idempotencyKey` for batches.
 
 ## Requirements
 
-- Node.js 18.17+
+- Node.js 20+ (`Symbol.asyncDispose`, used by `await using`, landed in Node 20)
+- TypeScript 5.0+, if you use TypeScript
 - [`undici`](https://undici.nodejs.org/) and [`ws`](https://github.com/websockets/ws)
   (installed automatically)
 
