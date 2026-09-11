@@ -350,6 +350,20 @@ describe('orders.send', () => {
     await fx.close();
   });
 
+  it('does not mistake a hand-written {id, ...} object for an account', async () => {
+    // Matching on `id` alone would read this as a bare account and silently
+    // drop `volume`; it must fail loudly instead.
+    const route = mock.post('/v1/orders', { status: 200, json: ORDER_RESPONSE });
+    const fx = client();
+    await expect(
+      fx.orders.send([{ id: A1, volume: 0.1 } as unknown as OrderLeg], {
+        defaults: { symbol: 'EURUSD', operation: 'buy' },
+      }),
+    ).rejects.toThrow(/orders\[0\]: unknown field 'id'/);
+    expect(route.called).toBe(false);
+    await fx.close();
+  });
+
   it('maps every idempotency failure to a typed error', async () => {
     for (const [status, code] of [
       [409, 'idempotency_in_flight'],

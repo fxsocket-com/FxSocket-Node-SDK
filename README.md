@@ -358,6 +358,10 @@ for await (const event of stream) {
 each branch. Keep a `default` arm: an unrecognised frame arrives as
 `{type: 'unknown'}` with the raw payload rather than being dropped.
 
+Each event goes to exactly one iterator, so a stream supports **one** `for await`
+loop at a time — a second one throws rather than quietly starving. Use the event
+listeners below when several parts of your app need the same events.
+
 It is also an `EventEmitter`, which suits long-lived services better:
 
 ```ts

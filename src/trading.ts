@@ -89,13 +89,22 @@ const CLOSE_SELECTOR_FIELDS = [
   'magic',
 ] as const;
 
+/**
+ * Is this entry a bare account rather than a leg?
+ *
+ * An id string, or a decoded account — which is recognised by `id` *and*
+ * `platform` together. Matching on `id` alone would swallow a hand-written
+ * `{id, volume}`: it would be read as an account and the other fields silently
+ * dropped, instead of failing with "accountId is required".
+ */
 function isAccountRef(value: unknown): value is AccountRef {
   if (typeof value === 'string') return true;
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as { id?: unknown; platform?: unknown };
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as { id?: unknown }).id === 'string' &&
-    !('accountId' in (value as object))
+    typeof candidate.id === 'string' &&
+    typeof candidate.platform === 'string' &&
+    !('accountId' in value)
   );
 }
 

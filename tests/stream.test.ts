@@ -338,6 +338,13 @@ describe('subscription validation', () => {
     const s = stream('ws://x/ws');
     await expect(s.subscribePrices('EURUSD')).rejects.toThrow(StreamError);
   });
+
+  it('refuses to list subscriptions before connecting', async () => {
+    // Unlike a subscribe, nothing would replay a `list` after a reconnect, so
+    // it must fail loudly rather than answer nothing.
+    const s = stream('ws://x/ws');
+    await expect(s.listSubscriptions()).rejects.toThrow(StreamError);
+  });
 });
 
 // --------------------------------------------------------------------------- //
@@ -650,6 +657,52 @@ describe('streaming', () => {
     await s.close();
 
     expect(s.lagDropped).toBeGreaterThan(0);
+  });
+
+  it('refuses a second concurrent iterator instead of starving it', async () => {
+    const server = await startServer((socket) => {
+      socket.once('message', () => socket.send(JSON.stringify(TICK_FRAME)));
+    });
+
+    const s = stream(server.url, { autoReconnect: false });
+    await s.connect();
+    await s.subscribePrices('EURUSD');
+
+    const first = (async () => {
+      for await (const event of s) {
+        if (event.type === 'tick') return event;
+      }
+      return undefined;
+    })();
+
+    await expect(
+      (async () => {
+        for await (const _event of s) break;
+      })(),
+    ).rejects.toThrow(/already being iterated/);
+
+    expect((await first)?.type).toBe('tick');
+    await s.close();
+  });
+
+  it('frees the stream for a later iterator when a loop is abandoned', async () => {
+    const server = await startServer((socket) => {
+      socket.on('message', () => socket.send(JSON.stringify(TICK_FRAME)));
+    });
+
+    const s = stream(server.url, { autoReconnect: false });
+    await s.connect();
+    await s.subscribePrices('EURUSD');
+
+    for await (const event of s) {
+      if (event.type === 'tick') break; // abandons the generator
+    }
+    // The finally block must have released the iterator lock.
+    await s.subscribePrices('EURUSD');
+    for await (const event of s) {
+      if (event.type === 'tick') break;
+    }
+    await s.close();
   });
 
   it('is safe to close twice', async () => {
