@@ -579,6 +579,29 @@ const fx = new FxSocket({
 modify / close must never replay, and a silent retry elsewhere would make that
 guarantee accidental. Retry deliberately, with an `idempotencyKey` for batches.
 
+## Coming from the Python SDK
+
+The two SDKs cover the same API and the same concepts. What differs:
+
+| Python                                     | Node                                                |
+| ------------------------------------------ | --------------------------------------------------- |
+| `Client` / `AsyncClient`                   | one promise-based `FxSocket` (`Client` is an alias) |
+| `TerminalClient` / `AsyncTerminalClient`   | `TerminalClient`                                    |
+| `Stream` / `AsyncStream`                   | `Stream` — async-iterable _and_ an `EventEmitter`   |
+| `snake_case` methods and fields            | `camelCase`                                         |
+| keyword arguments                          | a single options object                             |
+| `fx.readonly_keys`                         | `fx.readonlyKeys`                                   |
+| `term.order_history(from_, to)`            | `term.orderHistory({ from, to })`                   |
+| `Tick`, `Bar`, `AccountUpdate`, … classes  | one union discriminated on `event.type`             |
+| `result.is_filled`, `account.has_terminal` | the same names in camelCase, as plain fields        |
+| `Decimal` euro amounts                     | integer `…EurCents` plus a `…Eur` number            |
+| `timeout=30.0` (seconds)                   | `timeoutMs: 30_000`                                 |
+| `verify_terminal_tls=False`                | `verifyTerminalTls: false`                          |
+| raises `ValidationError`                   | rejects with `ValidationError`                      |
+
+Wire formats, validation rules, error codes and streaming semantics are
+identical, so a strategy ported between them behaves the same way.
+
 ## Requirements
 
 - Node.js 20+ (`Symbol.asyncDispose`, used by `await using`, landed in Node 20)
