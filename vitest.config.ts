@@ -10,6 +10,8 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],
+      // types.ts is declarations only — no runtime code to cover.
+      exclude: ['src/types.ts'],
       reporter: ['text', 'lcov'],
     },
   },
