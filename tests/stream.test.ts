@@ -33,8 +33,8 @@ interface TestServer {
 
 const servers: TestServer[] = [];
 
-async function startServer(handler: Handler): Promise<TestServer> {
-  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+async function startServer(handler: Handler, onPort = 0): Promise<TestServer> {
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: onPort });
   await new Promise<void>((resolve) => wss.once('listening', resolve));
   const { port } = wss.address() as AddressInfo;
 
@@ -65,6 +65,10 @@ async function startServer(handler: Handler): Promise<TestServer> {
 
   servers.push(server);
   return server;
+}
+
+async function startServerOnPort(port: number, handler: Handler): Promise<TestServer> {
+  return startServer(handler, port);
 }
 
 /** Wait for a condition, polling briefly. */
@@ -703,6 +707,131 @@ describe('streaming', () => {
       if (event.type === 'tick') break;
     }
     await s.close();
+  });
+
+  it('revives after a failed reconnect when connect() is called again', async () => {
+    // The standard recovery path: catch the StreamError, reconnect, keep
+    // iterating. Before the fix the second iterator returned nothing forever
+    // while the stream reported itself connected.
+    const first = await startServer((socket) => {
+      socket.on('message', () => socket.send(JSON.stringify(TICK_FRAME)));
+    });
+    const port = Number(new URL(first.url).port);
+
+    const s = stream(first.url, { autoReconnect: true, maxReconnectAttempts: 1 });
+    s.on('error', () => {});
+    await s.connect();
+    await s.subscribePrices('EURUSD');
+
+    let thrown: unknown;
+    // Started, not awaited: the loop only ends once the server is gone.
+    const draining = (async () => {
+      try {
+        for await (const _event of s) {
+          // drain until the server dies
+        }
+      } catch (error) {
+        thrown = error;
+      }
+    })();
+
+    // Kill the server so the reconnect budget runs out.
+    await first.close();
+    await draining;
+    expect(thrown).toBeInstanceOf(StreamError);
+
+    // Bring it back on the same port and recover.
+    const second = await startServerOnPort(port, (socket) => {
+      socket.on('message', () => socket.send(JSON.stringify(TICK_FRAME)));
+    });
+    await s.connect();
+    await s.subscribePrices('EURUSD');
+
+    let ticks = 0;
+    const resumed = (async () => {
+      for await (const event of s) {
+        if (event.type === 'tick') {
+          ticks += 1;
+          break;
+        }
+      }
+    })();
+    await until(() => ticks > 0, 15_000);
+    await s.close();
+    await resumed;
+    await second.close();
+
+    expect(ticks).toBeGreaterThan(0);
+  }, 60_000);
+
+  it('does not leave a live socket when close() races the handshake', async () => {
+    let live = 0;
+    const server = await startServer((socket) => {
+      live += 1;
+      socket.on('close', () => {
+        live -= 1;
+      });
+    });
+
+    const s = stream(server.url, { autoReconnect: false });
+    const connecting = s.connect().catch(() => undefined);
+    await s.close(); // lands while the handshake is still in flight
+    await connecting;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(s.isConnected).toBe(false);
+    expect(live).toBe(0);
+  });
+
+  it('does not duplicate sockets when a reconnected listener throws', async () => {
+    let live = 0;
+    const server = await startServer((socket, index) => {
+      live += 1;
+      socket.on('close', () => {
+        live -= 1;
+      });
+      socket.on('message', () => socket.send(JSON.stringify(TICK_FRAME)));
+      if (index === 1) setTimeout(() => socket.close(), 50);
+    });
+
+    const s = stream(server.url, { autoReconnect: true, maxReconnectAttempts: 3 });
+    s.on('error', () => {});
+    s.on('reconnected', () => {
+      throw new Error('listener blew up');
+    });
+    await s.connect();
+    await s.subscribePrices('EURUSD');
+
+    await until(() => server.connections >= 2, 15_000);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    // A throwing listener must not be read as a failed attempt and open more.
+    expect(live).toBeLessThanOrEqual(1);
+    await s.close();
+  }, 30_000);
+
+  it('stops delivering to listeners once closed', async () => {
+    const server = await startServer((socket) => {
+      socket.on('message', () => {
+        const send = (): void => {
+          if (socket.readyState === socket.OPEN)
+            socket.send(JSON.stringify(TICK_FRAME));
+        };
+        send();
+        setInterval(send, 20).unref?.();
+      });
+    });
+
+    const s = stream(server.url, { autoReconnect: false });
+    const ticks: unknown[] = [];
+    s.on('tick', (event) => ticks.push(event));
+    await s.connect();
+    await s.subscribePrices('EURUSD');
+    await until(() => ticks.length > 0);
+    await s.close();
+
+    const afterClose = ticks.length;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(ticks.length).toBe(afterClose);
   });
 
   it('is safe to close twice', async () => {

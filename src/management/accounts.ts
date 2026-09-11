@@ -6,6 +6,7 @@ import { decodeAccount, decodeList } from '../decode.js';
 import type { Platform } from '../enums.js';
 import { ValidationError } from '../errors.js';
 import type { HttpTransport } from '../http.js';
+import { coercePlatform } from '../validate.js';
 import type { Account, AccountRef } from '../types.js';
 
 /** Accept either an account object or a bare id string. */
@@ -60,7 +61,7 @@ function createPayload(params: CreateAccountParams): Record<string, unknown> {
   } = params;
 
   const body: Record<string, unknown> = {
-    platform,
+    platform: coercePlatform(platform),
     server,
     login,
     password,

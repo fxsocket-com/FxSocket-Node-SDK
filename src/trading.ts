@@ -40,6 +40,7 @@ import {
   compact,
   formatTime,
   rejectUnknownKeys,
+  requireInteger,
   validateOrderSend,
 } from './validate.js';
 
@@ -158,7 +159,7 @@ function orderFieldsPayload(
     if (fields[field] !== undefined) requireNumber(fields[field], where, field);
   }
   for (const field of ['slippage', 'magic', 'expertId'] as const) {
-    if (fields[field] !== undefined) requireNumber(fields[field], where, field);
+    if (fields[field] !== undefined) requireInteger(fields[field], where, field);
   }
 
   return compact({
@@ -286,14 +287,14 @@ function closeFieldsPayload(
     }
   }
   if (fields.slippage !== undefined) {
-    requireNumber(fields.slippage, where, 'slippage');
+    requireInteger(fields.slippage, where, 'slippage');
     if (fields.slippage < 0) {
       throw new ValidationError(
         `${where}: slippage must be >= 0, got ${fields.slippage}`,
       );
     }
   }
-  if (fields.magic !== undefined) requireNumber(fields.magic, where, 'magic');
+  if (fields.magic !== undefined) requireInteger(fields.magic, where, 'magic');
 
   return compact({
     symbol: fields.symbol,
@@ -319,8 +320,8 @@ function validateCloseLeg(
     if (leg.tickets.length === 0) {
       throw new ValidationError(`${where}: tickets must not be empty`);
     }
-    if (leg.tickets.some((t) => !Number.isFinite(t) || t < 1)) {
-      throw new ValidationError(`${where}: tickets must be >= 1`);
+    if (leg.tickets.some((t) => !Number.isInteger(t) || t < 1)) {
+      throw new ValidationError(`${where}: tickets must be whole numbers >= 1`);
     }
     const mixed = CLOSE_SELECTOR_FIELDS.filter(
       (field) => (leg as unknown as Record<string, unknown>)[field] !== undefined,

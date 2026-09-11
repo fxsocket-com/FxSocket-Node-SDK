@@ -180,13 +180,53 @@ describe('privateServers.removeAccount', () => {
 });
 
 describe('terminal from a private-server account', () => {
-  it('builds a terminal client with TLS verification off', async () => {
+  it('builds a terminal client bound to the droplet endpoint', async () => {
     mock.get('/v1/private-servers', { status: 200, json: [SERVER] });
     const fx = client();
     const [server] = await fx.privateServers.list();
-    const terminal = fx.terminal(server!.accounts[0]!, { verify: false });
+    const terminal = fx.terminal(server!.accounts[0]!);
     expect(terminal).toBeInstanceOf(TerminalClient);
     expect(terminal.baseUrl).toBe(SERVER_ACCOUNT.rest_url);
     await fx.close();
+  });
+
+  it('skips TLS verification for a self-signed droplet certificate', async () => {
+    // No dispatcher here: the client builds its own agent with verification
+    // off, which is the whole point of verifyTerminalTls.
+    const fx = new FxSocket({ apiKey: 'fxs_live_test', verifyTerminalTls: false });
+    const terminal = fx.terminal({
+      ...SERVER_ACCOUNT,
+      platform: 'mt5' as const,
+      restUrl: SERVER_ACCOUNT.rest_url,
+      wsUrl: SERVER_ACCOUNT.ws_url,
+      tradeEaSymbol: '',
+      createdAt: new Date(),
+      hasTerminal: true,
+      status: 'ready' as const,
+    });
+    expect(terminal).toBeInstanceOf(TerminalClient);
+    await fx.close();
+  });
+
+  it('refuses to silently ignore verify:false when a dispatcher is supplied', () => {
+    // TLS belongs to whoever built the dispatcher, so the contradiction has to
+    // surface rather than leave the droplet failing on its certificate.
+    const fx = client();
+    expect(() =>
+      fx.terminal(
+        {
+          ...SERVER_ACCOUNT,
+          platform: 'mt5' as const,
+          restUrl: SERVER_ACCOUNT.rest_url,
+          wsUrl: SERVER_ACCOUNT.ws_url,
+          tradeEaSymbol: '',
+          createdAt: new Date(),
+          hasTerminal: true,
+          status: 'ready' as const,
+        },
+        { verify: false },
+      ),
+    ).toThrow(/cannot be combined with a custom dispatcher/);
+    void fx.close();
   });
 });

@@ -29,6 +29,33 @@ which is why the version starts there rather than at 0.1.0.
   and terminal error envelopes.
 - Dual ESM and CommonJS builds with type declarations for each.
 
+### Fixed before release
+
+Found by an adversarial review of the port and reproduced against a local
+WebSocket server:
+
+- A stream whose reconnect budget ran out stayed permanently un-iterable. The
+  iterator surfaced the error and latched, so the standard recovery (catch,
+  reconnect, keep iterating) produced a feed the app believed was live and which
+  never delivered another tick. `connect()` now clears the latch.
+- `close()` racing an in-flight handshake left a live, subscribed socket and its
+  ping timer behind, still delivering events to listeners. The handshake now
+  refuses to install a socket once the stream is closing.
+- A `reconnected` listener that threw was read as a failed attempt, so the
+  retry loop opened a second socket while the first was live and duplicated
+  every tick and trade. The event is now emitted outside the retry block.
+- `verifyTls: false` was silently discarded whenever a custom dispatcher was
+  supplied, leaving private-hosting droplets failing on their self-signed
+  certificate with nothing in the caller's configuration to explain it. The
+  contradiction now raises.
+- A timeout that elapsed while the response body was still streaming escaped as
+  undici's own error instead of a `TimeoutError`.
+- A second concurrent `for await` on one stream silently starved instead of
+  saying so, and `listSubscriptions()` mid-reconnect resolved without ever
+  producing a frame.
+- A hand-written `{id, volume}` batch leg was read as a bare account, silently
+  dropping every other field.
+
 ### Notes
 
 - Node is async-only, so the Python SDK's `Client` / `AsyncClient` pair

@@ -12,6 +12,7 @@ import {
 } from '../decode.js';
 import type { Platform } from '../enums.js';
 import type { HttpTransport } from '../http.js';
+import { coercePlatform } from '../validate.js';
 import type { AccountRef, PrivateServer, PrivateServerAccount } from '../types.js';
 
 /** Accept either a {@link PrivateServer} or a bare id string. */
@@ -66,7 +67,7 @@ export class PrivateServers {
     params: AddPrivateAccountParams,
   ): Promise<PrivateServerAccount> {
     const body = {
-      platform: params.platform ?? 'mt5',
+      platform: coercePlatform(params.platform ?? 'mt5'),
       server: params.server,
       login: params.login,
       password: params.password,

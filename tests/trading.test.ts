@@ -230,17 +230,37 @@ describe('orders.send', () => {
     await fx.close();
   });
 
-  it('serializes a Date expiration as ISO 8601', async () => {
+  it('serializes a Date expiration as a zone-less UTC wall clock', async () => {
+    // The terminal reads expiry as broker server time, so no zone suffix is
+    // sent; using UTC components keeps the value independent of the host's TZ.
     const route = mock.post('/v1/orders', { status: 200, json: ORDER_RESPONSE });
     const fx = client();
     await fx.orders.send(
-      [{ accountId: A1, expiration: new Date(Date.UTC(2026, 11, 31)) }],
+      [{ accountId: A1, expiration: new Date(Date.UTC(2026, 11, 31, 21, 30, 5)) }],
       {
         defaults: { symbol: 'EURUSD', operation: 'buyLimit', volume: 0.1, price: 1.2 },
       },
     );
     const sent = route.sent as { orders: Record<string, unknown>[] };
-    expect(sent.orders[0]!['expiration']).toBe('2026-12-31T00:00:00.000Z');
+    expect(sent.orders[0]!['expiration']).toBe('2026-12-31T21:30:05');
+    await fx.close();
+  });
+
+  it('rejects a fractional slippage, magic or ticket', async () => {
+    const route = mock.post('/v1/orders', { status: 200, json: ORDER_RESPONSE });
+    const defaults = { symbol: 'EURUSD', operation: 'buy', volume: 0.1 } as const;
+    const fx = client();
+
+    await expect(
+      fx.orders.send([{ accountId: A1, slippage: 0.5 }], { defaults }),
+    ).rejects.toThrow(/slippage must be a whole number/);
+    await expect(
+      fx.orders.send([{ accountId: A1, magic: 1.5 }], { defaults }),
+    ).rejects.toThrow(/magic must be a whole number/);
+    await expect(fx.orders.close([{ accountId: A1, tickets: [1.5] }])).rejects.toThrow(
+      /tickets must be whole numbers >= 1/,
+    );
+    expect(route.called).toBe(false);
     await fx.close();
   });
 
@@ -469,7 +489,7 @@ describe('orders.close', () => {
       /tickets must not be empty/,
     );
     await expect(fx.orders.close([{ accountId: A1, tickets: [0] }])).rejects.toThrow(
-      /tickets must be >= 1/,
+      /tickets must be whole numbers >= 1/,
     );
     await expect(
       fx.orders.close([{ accountId: A1, symbol: 'EURUSD', volume: 0 }]),

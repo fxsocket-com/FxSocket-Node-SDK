@@ -558,6 +558,23 @@ broker server time** — the trailing `Z` is stylistic and does **not** mean UTC
 the SDK leaves them as sent rather than silently mis-dating them. Use
 `terminal.serverTimezone()` to get the broker's UTC offset if you need to convert.
 
+The same applies to timestamps you _send_ — an order `expiration`, or the `from`
+/ `to` bounds on the history endpoints. A string is passed through verbatim and
+is the unambiguous way to express them. A `Date` is rendered as its UTC wall
+clock with no zone suffix (`2030-01-01T21:30:00`), which keeps the value the same
+whatever `TZ` the process runs under. The terminal then reads those digits as
+broker time, so on a broker three hours ahead of UTC an expiry built from a
+`Date` lands three hours earlier than the instant you meant. When that matters,
+shift it yourself:
+
+```ts
+const { utcOffsetSeconds } = await terminal.serverTimezone();
+const wanted = Date.now() + 3 * 24 * 60 * 60 * 1000; // the real instant
+const expiration = new Date(wanted + utcOffsetSeconds * 1000)
+  .toISOString()
+  .slice(0, 19); // broker wall clock
+```
+
 ## Advanced
 
 **Custom dispatcher.** `dispatcher` takes any undici `Dispatcher` — a proxy

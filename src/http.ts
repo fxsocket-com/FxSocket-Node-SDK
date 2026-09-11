@@ -11,7 +11,12 @@
 
 import { Agent, request, type Dispatcher } from 'undici';
 
-import { ConnectionError, errorFromResponse, TimeoutError } from './errors.js';
+import {
+  ConnectionError,
+  errorFromResponse,
+  TimeoutError,
+  ValidationError,
+} from './errors.js';
 import type { ErrorResponse } from './errors.js';
 import { VERSION } from './version.js';
 
@@ -113,6 +118,17 @@ export class HttpTransport {
     this.timeoutMs = options.timeoutMs;
     this.baseHeaders = { ...authHeaders(options.apiKey), ...options.headers };
     if (options.dispatcher) {
+      if (options.verifyTls === false) {
+        // TLS belongs to whoever built the dispatcher. Honouring `verifyTls`
+        // here would mean discarding their proxy or pool, and ignoring it
+        // would leave a private droplet failing on its self-signed cert with
+        // nothing in the caller's configuration to explain why.
+        throw new ValidationError(
+          'verifyTls: false cannot be combined with a custom dispatcher — ' +
+            'configure TLS on the dispatcher itself ' +
+            '(new Agent({ connect: { rejectUnauthorized: false } })).',
+        );
+      }
       this.dispatcher = options.dispatcher;
       this.ownsDispatcher = false;
     } else if (options.verifyTls === false) {
@@ -155,15 +171,31 @@ export class HttpTransport {
     }
 
     const timeoutMs = options.timeoutMs ?? this.timeoutMs;
-    let response: Dispatcher.ResponseData;
     try {
-      response = await request(url, {
+      const response = await request(url, {
         method,
         headers,
         body,
         signal: AbortSignal.timeout(timeoutMs),
         ...(this.dispatcher ? { dispatcher: this.dispatcher } : {}),
       });
+      // Reading the body must stay inside this try: a timeout can elapse while
+      // the response is still streaming, and that abort has to map to a typed
+      // error like any other.
+      const text = await response.body.text();
+      let parsed: unknown = null;
+      if (text !== '' && response.statusCode !== 204) {
+        try {
+          parsed = JSON.parse(text) as unknown;
+        } catch {
+          parsed = text;
+        }
+      }
+      return {
+        status: response.statusCode,
+        headers: normalizeHeaders(response.headers),
+        body: parsed,
+      };
     } catch (error) {
       if (isAbortError(error)) {
         throw new TimeoutError(`${method} ${url} timed out after ${timeoutMs}ms`, {
@@ -173,21 +205,6 @@ export class HttpTransport {
       const detail = error instanceof Error ? error.message : String(error);
       throw new ConnectionError(`${method} ${url} failed: ${detail}`, { cause: error });
     }
-
-    const text = await response.body.text();
-    let parsed: unknown = null;
-    if (text !== '' && response.statusCode !== 204) {
-      try {
-        parsed = JSON.parse(text) as unknown;
-      } catch {
-        parsed = text;
-      }
-    }
-    return {
-      status: response.statusCode,
-      headers: normalizeHeaders(response.headers),
-      body: parsed,
-    };
   }
 
   /** Release the dispatcher this transport owns, if any. */

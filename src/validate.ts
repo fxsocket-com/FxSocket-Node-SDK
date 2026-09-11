@@ -76,6 +76,12 @@ export function coerceTimeframe(value: TimeframeInput): Timeframe {
   return alias;
 }
 
+/** Validate a platform value, the way the API's enum does. */
+export function coercePlatform(value: unknown): Platform {
+  if (value === 'mt4' || value === 'mt5') return value;
+  throw new ValidationError(`platform must be one of mt4, mt5, got ${inspect(value)}`);
+}
+
 /** Reject an MT5-only timeframe on an MT4 account, before any request. */
 export function checkTimeframe(timeframe: Timeframe, platform: Platform): void {
   if (platform === 'mt4' && MT5_ONLY_TIMEFRAMES.has(timeframe)) {
@@ -184,10 +190,35 @@ export function resolveModifyStops(input: ModifyInput): {
   };
 }
 
-/** Serialize a time input; strings pass through verbatim. */
+/**
+ * Serialize a time input.
+ *
+ * A string passes through verbatim, which is the unambiguous way to express
+ * these fields: the terminal reads them as *broker server time*, and no zone
+ * conversion the SDK could perform would be right for every broker.
+ *
+ * A `Date` is rendered as its UTC wall clock without a zone suffix
+ * (`2030-01-01T00:00:00`). Using UTC rather than the host's local time keeps
+ * the value identical whatever `TZ` the process runs under — an order's expiry
+ * must not depend on which machine sent it.
+ */
 export function formatTime(value: TimeInput | undefined): string | undefined {
   if (value === undefined || value === null) return undefined;
-  return value instanceof Date ? value.toISOString() : String(value);
+  if (!(value instanceof Date)) return String(value);
+  if (Number.isNaN(value.getTime())) {
+    throw new ValidationError('an invalid Date cannot be sent as a timestamp');
+  }
+  return value.toISOString().slice(0, 19);
+}
+
+/** Require a whole number, the way the API's integer fields do. */
+export function requireInteger(value: unknown, where: string, field: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw new ValidationError(
+      `${where}: ${field} must be a whole number, got ${inspect(value)}`,
+    );
+  }
+  return value;
 }
 
 /** Drop keys whose value is `undefined`, so omitted fields aren't sent. */
