@@ -54,8 +54,17 @@ export class AuthError extends FxSocketError {}
  * The key is valid but may not do this (HTTP 403) — typically a read-only
  * `fxs_ro_…` key on an endpoint that mutates state, such as multi-account
  * trading.
+ *
+ * Base class for {@link NotBalanceFundedError}.
  */
 export class ForbiddenError extends FxSocketError {}
+
+/**
+ * This private server is not paid from the prepaid balance (HTTP 403
+ * `not_balance_funded`). Card- and crypto-funded servers are resized and
+ * canceled in the dashboard, since the API only moves balance.
+ */
+export class NotBalanceFundedError extends ForbiddenError {}
 
 /** Too many requests (HTTP 429). `retryAfter` is seconds, if given. */
 export class RateLimitError extends FxSocketError {
@@ -153,7 +162,7 @@ export class DuplicateAccountError extends FxSocketError {}
 
 /**
  * Every purchased slot on the private server is taken (HTTP 409 `slots_full`).
- * Raise the server's limit from the dashboard.
+ * Buy more with `client.privateServers.resize()`.
  */
 export class SlotsFullError extends FxSocketError {
   /** Slots in use, when reported. */
@@ -170,6 +179,24 @@ export class SlotsFullError extends FxSocketError {
     this.cap = options.cap;
   }
 }
+
+/**
+ * You already own as many private servers as you may (HTTP 409
+ * `server_limit_reached`) — see `maxServers` on {@link PrivateServerOptions}.
+ */
+export class ServerLimitError extends FxSocketError {}
+
+/**
+ * The server holds more accounts than the requested slot count allows (HTTP 409
+ * `accounts_exceed_target`). Remove accounts first, then resize.
+ */
+export class AccountsExceedTargetError extends FxSocketError {}
+
+/**
+ * The paid period has already run out, so the cancellation can no longer be
+ * undone (HTTP 409 `already_lapsed`) — the machine is gone; buy a new server.
+ */
+export class AlreadyLapsedError extends FxSocketError {}
 
 /**
  * A multi-account batch was refused because of its `Idempotency-Key`.
@@ -260,7 +287,11 @@ export function errorFromResponse(response: ErrorResponse): FxSocketError {
   const common: FxSocketErrorOptions = { status, code, response };
 
   if (status === 401) return new AuthError(message, common);
-  if (status === 403) return new ForbiddenError(message, common);
+  if (status === 403) {
+    if (code === 'not_balance_funded')
+      return new NotBalanceFundedError(message, common);
+    return new ForbiddenError(message, common);
+  }
   if (code !== undefined && IDEMPOTENCY_CODES.has(code)) {
     return new IdempotencyError(message, common);
   }
@@ -281,6 +312,11 @@ export function errorFromResponse(response: ErrorResponse): FxSocketError {
         cap: intOrUndefined(body['cap']),
       });
     }
+    if (code === 'server_limit_reached') return new ServerLimitError(message, common);
+    if (code === 'accounts_exceed_target') {
+      return new AccountsExceedTargetError(message, common);
+    }
+    if (code === 'already_lapsed') return new AlreadyLapsedError(message, common);
     return new DuplicateAccountError(message, common);
   }
   if (status === 402) {

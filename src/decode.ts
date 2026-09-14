@@ -19,6 +19,7 @@ import {
   OrderOutcome,
 } from './enums.js';
 import type { HealthStatus, KeyScope, PrivateServerStatus } from './enums.js';
+import { ValidationError } from './errors.js';
 import type {
   Account,
   AccountHealth,
@@ -47,9 +48,11 @@ import type {
   PositionTrade,
   PrivateServer,
   PrivateServerAccount,
+  PrivateServerOptions,
   ProfitCalc,
   Quote,
   ReadOnlyKey,
+  Region,
   ScopedAccount,
   ServerTimezone,
   SymbolInfo,
@@ -201,6 +204,36 @@ export function decodePrivateServer(raw: unknown): PrivateServer {
     accounts: list(w['accounts'], decodePrivateServerAccount),
     isReady: status === 'ready',
     freeSlots: Math.max(purchasedSlots - usedSlots, 0),
+  };
+}
+
+export function decodeRegion(raw: unknown): Region {
+  const w = asObject(raw);
+  return { code: str(w['code']), label: str(w['label']) };
+}
+
+export function decodePrivateServerOptions(raw: unknown): PrivateServerOptions {
+  const w = asObject(raw);
+  const regions = list(w['regions'], decodeRegion);
+  const firstSlotEurCents = int(w['first_slot_eur_cents']);
+  const additionalSlotEurCents = int(w['additional_slot_eur_cents']);
+  const priceEurCents = (slots: number): number => {
+    if (!Number.isInteger(slots) || slots < 1) {
+      throw new ValidationError(`slots must be a whole number >= 1, got ${slots}`);
+    }
+    return firstSlotEurCents + additionalSlotEurCents * (slots - 1);
+  };
+  return {
+    enabled: bool(w['enabled'], true),
+    regions,
+    maxSlots: int(w['max_slots']),
+    maxServers: int(w['max_servers']),
+    firstSlotEurCents,
+    additionalSlotEurCents,
+    regionCodes: regions.map((region) => region.code),
+    // Closures, not `this`, so a destructured `monthlyPriceEur` still works.
+    monthlyPriceEurCents: priceEurCents,
+    monthlyPriceEur: (slots: number) => eur(priceEurCents(slots)),
   };
 }
 

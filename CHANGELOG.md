@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-14
+
+Matches [FxSocket Python SDK](https://github.com/fxsocket-com/FxSocket-Python-SDK)
+0.7.0.
+
+### Added
+
+- `privateServers` now covers the whole v1 Private Servers surface.
+  `create()` buys a server from the prepaid balance (slots / region / optional
+  name, charged immediately, comes back `provisioning`); `resize()` changes the
+  slot count (increases prorated and charged now, decreases scheduled for
+  renewal); `cancel()` / `resume()` stop and restart renewal; `delete()`
+  destroys the machine with no refund.
+- `privateServers.regions()`, returning the new `PrivateServerOptions` —
+  available regions, `maxSlots` / `maxServers` and pricing in cents, with a
+  materialized `regionCodes` and `monthlyPriceEurCents()` /
+  `monthlyPriceEur()` for what a given slot count costs per month.
+- `ServerLimitError` (409 `server_limit_reached`), `AccountsExceedTargetError`
+  (409 `accounts_exceed_target`), `AlreadyLapsedError` (409 `already_lapsed`)
+  and `NotBalanceFundedError` (403 `not_balance_funded`, a `ForbiddenError`
+  subclass). Without these the 409 branch of `errorFromResponse` fell through
+  to `DuplicateAccountError`, mislabelling every new conflict.
+
+### Changed
+
+- Docs no longer claim purchasing, resizing and cancelling are dashboard-only;
+  `SlotsFullError` points at `resize()` instead.
+
 ## [0.6.0] - 2026-09-11
 
 Initial release. Feature parity with the
@@ -69,4 +97,5 @@ WebSocket server:
   `maxQueueSize` (10,000 by default), emitting a `lag` event, so a fast tick
   feed cannot grow memory without bound.
 
+[0.7.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.7.0
 [0.6.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.6.0

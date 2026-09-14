@@ -3,12 +3,19 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  AccountsExceedTargetError,
+  AlreadyLapsedError,
   DuplicateAccountError,
+  ForbiddenError,
   FxSocket,
+  InsufficientBalanceError,
+  NotBalanceFundedError,
   PrivateAccountStatus,
   PrivateServerStatus,
+  ServerLimitError,
   SlotsFullError,
   TerminalClient,
+  ValidationError,
 } from '../src/index.js';
 import { HttpMock, ORIGIN } from './helpers/mock-http.js';
 
@@ -39,6 +46,18 @@ const SERVER = {
   cancel_at_period_end: false,
   period_end: '2026-08-16T07:01:08Z',
   accounts: [SERVER_ACCOUNT],
+};
+
+const REGIONS = {
+  enabled: true,
+  regions: [
+    { code: 'fra1', label: 'Frankfurt, Germany' },
+    { code: 'lon1', label: 'London, United Kingdom' },
+  ],
+  max_slots: 10,
+  max_servers: 3,
+  first_slot_eur_cents: 1700,
+  additional_slot_eur_cents: 1400,
 };
 
 let mock: HttpMock;
@@ -98,6 +117,209 @@ describe('privateServers.get', () => {
     const byModel = await fx.privateServers.get(byId);
     expect(route.callCount).toBe(2);
     expect(byModel.id).toBe(SERVER_ID);
+    await fx.close();
+  });
+});
+
+describe('privateServers.regions', () => {
+  it('decodes the options payload and prices a server', async () => {
+    mock.get('/v1/private-servers/regions', { status: 200, json: REGIONS });
+    const fx = client();
+    const options = await fx.privateServers.regions();
+
+    expect(options.enabled).toBe(true);
+    expect(options.regionCodes).toEqual(['fra1', 'lon1']);
+    expect(options.regions[0]!.label).toBe('Frankfurt, Germany');
+    expect(options.maxSlots).toBe(10);
+    expect(options.maxServers).toBe(3);
+    expect(options.monthlyPriceEurCents(1)).toBe(1700);
+    expect(options.monthlyPriceEurCents(3)).toBe(4500);
+    expect(options.monthlyPriceEur(3)).toBe(45);
+    expect(() => options.monthlyPriceEurCents(0)).toThrow(ValidationError);
+
+    // Pricing must survive being pulled off the object.
+    const { monthlyPriceEur } = options;
+    expect(monthlyPriceEur(2)).toBe(31);
+    await fx.close();
+  });
+
+  it('reports a deployment with private hosting switched off', async () => {
+    mock.get('/v1/private-servers/regions', {
+      status: 200,
+      json: {
+        enabled: false,
+        regions: [],
+        max_slots: 0,
+        max_servers: 0,
+        first_slot_eur_cents: 0,
+        additional_slot_eur_cents: 0,
+      },
+    });
+    const fx = client();
+    const options = await fx.privateServers.regions();
+    expect(options.enabled).toBe(false);
+    expect(options.regionCodes).toEqual([]);
+    await fx.close();
+  });
+});
+
+describe('privateServers.create', () => {
+  it('posts slots, region and name', async () => {
+    const route = mock.post('/v1/private-servers', {
+      status: 201,
+      json: { ...SERVER, status: 'provisioning', accounts: [] },
+    });
+    const fx = client();
+    const server = await fx.privateServers.create({
+      slots: 2,
+      region: 'lon1',
+      name: 'My Prop Guard',
+    });
+
+    expect(route.sent).toEqual({ slots: 2, region: 'lon1', name: 'My Prop Guard' });
+    expect(server.status).toBe(PrivateServerStatus.PROVISIONING);
+    expect(server.isReady).toBe(false);
+    await fx.close();
+  });
+
+  it('omits a blank name', async () => {
+    const route = mock.post('/v1/private-servers', { status: 201, json: SERVER });
+    const fx = client();
+    await fx.privateServers.create({ slots: 1, region: 'fra1' });
+    expect(route.sent).toEqual({ slots: 1, region: 'fra1' });
+    await fx.close();
+  });
+
+  it('rejects a nonsensical slot count before sending anything', async () => {
+    const route = mock.post('/v1/private-servers', { status: 201, json: SERVER });
+    const fx = client();
+    await expect(
+      fx.privateServers.create({ slots: 0, region: 'fra1' }),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      fx.privateServers.create({ slots: 1.5, region: 'fra1' }),
+    ).rejects.toThrow(ValidationError);
+    expect(route.called).toBe(false);
+    await fx.close();
+  });
+
+  it('maps an unaffordable purchase to InsufficientBalanceError', async () => {
+    mock.post('/v1/private-servers', {
+      status: 402,
+      json: {
+        error: 'insufficient_balance',
+        detail: 'Balance does not cover it.',
+        shortfall_eur_cents: 1200,
+      },
+    });
+    const fx = client();
+    const error = await fx.privateServers
+      .create({ slots: 2, region: 'lon1' })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(InsufficientBalanceError);
+    expect((error as InsufficientBalanceError).shortfallEur).toBe(12);
+    await fx.close();
+  });
+
+  it('maps server_limit_reached to its own error, not a duplicate', async () => {
+    mock.post('/v1/private-servers', {
+      status: 409,
+      json: { error: 'server_limit_reached', detail: 'You own 3 of 3.' },
+    });
+    const fx = client();
+    const error = await fx.privateServers
+      .create({ slots: 1, region: 'lon1' })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(ServerLimitError);
+    expect(error).not.toBeInstanceOf(DuplicateAccountError);
+    expect((error as ServerLimitError).code).toBe('server_limit_reached');
+    await fx.close();
+  });
+});
+
+describe('privateServers.resize', () => {
+  it('patches the new slot count', async () => {
+    const route = mock.patch(`/v1/private-servers/${SERVER_ID}`, {
+      status: 200,
+      json: { ...SERVER, purchased_slots: 4 },
+    });
+    const fx = client();
+    const server = await fx.privateServers.resize(SERVER_ID, { slots: 4 });
+
+    expect(route.sent).toEqual({ slots: 4 });
+    expect(server.purchasedSlots).toBe(4);
+    expect(server.freeSlots).toBe(3);
+    await fx.close();
+  });
+
+  it('maps shrinking below the hosted accounts to a typed error', async () => {
+    mock.patch(`/v1/private-servers/${SERVER_ID}`, {
+      status: 409,
+      json: { error: 'accounts_exceed_target', detail: '2 accounts, 1 slot.' },
+    });
+    const fx = client();
+    await expect(fx.privateServers.resize(SERVER_ID, { slots: 1 })).rejects.toThrow(
+      AccountsExceedTargetError,
+    );
+    await fx.close();
+  });
+
+  it('maps a card-funded server to NotBalanceFundedError, a ForbiddenError', async () => {
+    mock.patch(`/v1/private-servers/${SERVER_ID}`, {
+      status: 403,
+      json: { error: 'not_balance_funded', detail: 'Card-funded server.' },
+    });
+    const fx = client();
+    const error = await fx.privateServers
+      .resize(SERVER_ID, { slots: 4 })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(NotBalanceFundedError);
+    expect(error).toBeInstanceOf(ForbiddenError);
+    await fx.close();
+  });
+});
+
+describe('privateServers.cancel / resume / delete', () => {
+  it('cancels and resumes over the same /cancel path', async () => {
+    const cancelRoute = mock.post(`/v1/private-servers/${SERVER_ID}/cancel`, {
+      status: 200,
+      json: { ...SERVER, cancel_at_period_end: true },
+    });
+    const resumeRoute = mock.delete(`/v1/private-servers/${SERVER_ID}/cancel`, {
+      status: 200,
+      json: SERVER,
+    });
+    const fx = client();
+    const stopped = await fx.privateServers.cancel(SERVER_ID);
+    const resumed = await fx.privateServers.resume(stopped);
+
+    expect(cancelRoute.called).toBe(true);
+    expect(resumeRoute.called).toBe(true);
+    expect(stopped.cancelAtPeriodEnd).toBe(true);
+    expect(resumed.cancelAtPeriodEnd).toBe(false);
+    await fx.close();
+  });
+
+  it('maps a resume after the period lapsed', async () => {
+    mock.delete(`/v1/private-servers/${SERVER_ID}/cancel`, {
+      status: 409,
+      json: { error: 'already_lapsed', detail: 'Period has lapsed.' },
+    });
+    const fx = client();
+    await expect(fx.privateServers.resume(SERVER_ID)).rejects.toThrow(
+      AlreadyLapsedError,
+    );
+    await fx.close();
+  });
+
+  it('destroys the server', async () => {
+    const route = mock.delete(`/v1/private-servers/${SERVER_ID}`, { status: 204 });
+    const fx = client();
+    await fx.privateServers.delete(SERVER_ID);
+    expect(route.called).toBe(true);
     await fx.close();
   });
 });

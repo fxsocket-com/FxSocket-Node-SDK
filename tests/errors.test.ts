@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   AccountCapError,
+  AccountsExceedTargetError,
+  AlreadyLapsedError,
   AuthError,
   ConnectFailedError,
   DuplicateAccountError,
@@ -13,10 +15,12 @@ import {
   IdempotencyError,
   InsufficientBalanceError,
   NoSubscriptionError,
+  NotBalanceFundedError,
   NotFoundError,
   PaymentRequiredError,
   RateLimitError,
   SeatLapsedError,
+  ServerLimitError,
   SlotsFullError,
   TerminalNotReadyError,
   TerminalTimeoutError,
@@ -71,6 +75,14 @@ describe('errorFromResponse', () => {
     expect(errorFromResponse(response(403, {}))).toBeInstanceOf(ForbiddenError);
   });
 
+  it('maps a 403 not_balance_funded to a ForbiddenError subclass', () => {
+    const error = errorFromResponse(
+      response(403, { error: 'not_balance_funded', detail: 'Card-funded.' }),
+    );
+    expect(error).toBeInstanceOf(NotBalanceFundedError);
+    expect(error).toBeInstanceOf(ForbiddenError);
+  });
+
   it('maps terminal 503 and 504', () => {
     expect(errorFromResponse(response(503, {}))).toBeInstanceOf(TerminalNotReadyError);
     expect(errorFromResponse(response(504, { error: 'MRPC_TIMEOUT' }))).toBeInstanceOf(
@@ -101,6 +113,23 @@ describe('errorFromResponse', () => {
     expect(full).toBeInstanceOf(SlotsFullError);
     expect((full as SlotsFullError).used).toBe(2);
     expect((full as SlotsFullError).cap).toBe(2);
+  });
+
+  it('keeps the private-server 409s out of DuplicateAccountError', () => {
+    // Each of these used to fall through to "account already linked", which
+    // mislabelled every new conflict the private-server endpoints can raise.
+    const cases = [
+      ['server_limit_reached', ServerLimitError],
+      ['accounts_exceed_target', AccountsExceedTargetError],
+      ['already_lapsed', AlreadyLapsedError],
+    ] as const;
+
+    for (const [code, type] of cases) {
+      const error = errorFromResponse(response(409, { error: code, detail: 'no' }));
+      expect(error).toBeInstanceOf(type);
+      expect(error).not.toBeInstanceOf(DuplicateAccountError);
+      expect(error.code).toBe(code);
+    }
   });
 
   it('maps every 402 code to a typed error', () => {

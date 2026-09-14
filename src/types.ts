@@ -102,8 +102,8 @@ export interface PrivateServerAccount {
  * A dedicated private hosting server (v1 API).
  *
  * `purchasedSlots` is the paid limit; `usedSlots` how many accounts currently
- * live on the server. Purchasing, canceling and slot changes happen in the
- * dashboard, not the API.
+ * live on the server. `cancelAtPeriodEnd` is true once the server has been told
+ * to stop instead of renewing — it then runs until `periodEnd` and expires.
  */
 export interface PrivateServer {
   readonly id: string;
@@ -121,6 +121,40 @@ export interface PrivateServer {
   readonly isReady: boolean;
   /** *Derived.* Purchased slots minus used slots, never below zero. */
   readonly freeSlots: number;
+}
+
+/** One place a private server can run in. */
+export interface Region {
+  readonly code: string;
+  readonly label: string;
+}
+
+/**
+ * Where private servers may run, how big they may be and what that costs
+ * (`GET /v1/private-servers/regions`).
+ *
+ * `enabled` is false when private hosting is off for the deployment — `regions`
+ * is then empty. Prices are integer EUR cents, and a server costs
+ * `firstSlotEurCents + additionalSlotEurCents * (slots - 1)` per month;
+ * {@link PrivateServerOptions.monthlyPriceEurCents} does that arithmetic. Treat
+ * the returned list as authoritative rather than hardcoding region slugs.
+ */
+export interface PrivateServerOptions {
+  readonly enabled: boolean;
+  readonly regions: readonly Region[];
+  readonly maxSlots: number;
+  readonly maxServers: number;
+  readonly firstSlotEurCents: number;
+  readonly additionalSlotEurCents: number;
+  /** *Derived.* Just the slugs, in the order the API returned them. */
+  readonly regionCodes: readonly string[];
+  /**
+   * What a server of `slots` accounts costs per month, in integer EUR cents.
+   * Raises {@link ValidationError} below one slot.
+   */
+  monthlyPriceEurCents(slots: number): number;
+  /** {@link PrivateServerOptions.monthlyPriceEurCents} as euros, for display. */
+  monthlyPriceEur(slots: number): number;
 }
 
 /** Compact account shape attached to a scoped read-only key. */

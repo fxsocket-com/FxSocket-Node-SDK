@@ -49,6 +49,8 @@ export {
   PrivateServers,
   privateServerIdOf,
   type AddPrivateAccountParams,
+  type CreatePrivateServerParams,
+  type ResizePrivateServerParams,
 } from './management/private-servers.js';
 
 export {
@@ -125,6 +127,8 @@ export {
 
 export {
   AccountCapError,
+  AccountsExceedTargetError,
+  AlreadyLapsedError,
   AuthError,
   ConnectFailedError,
   ConnectionError,
@@ -135,10 +139,12 @@ export {
   IdempotencyError,
   InsufficientBalanceError,
   NoSubscriptionError,
+  NotBalanceFundedError,
   NotFoundError,
   PaymentRequiredError,
   RateLimitError,
   SeatLapsedError,
+  ServerLimitError,
   SlotsFullError,
   StreamError,
   TerminalNotReadyError,
@@ -187,9 +193,11 @@ export type {
   PositionTrade,
   PrivateServer,
   PrivateServerAccount,
+  PrivateServerOptions,
   ProfitCalc,
   Quote,
   ReadOnlyKey,
+  Region,
   ScopedAccount,
   ServerTimezone,
   SymbolInfo,

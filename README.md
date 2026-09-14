@@ -12,8 +12,8 @@ stream live updates over REST and WebSocket.
 ## Features
 
 - **Account management** — link, list, fetch, and disconnect MT4/MT5 accounts.
-- **Private servers** — list your dedicated hosting servers and manage the
-  accounts on them.
+- **Private servers** — buy, resize, cancel and delete dedicated hosting
+  servers, and manage the accounts on them.
 - **Read-only keys** — mint, scope, rotate and revoke `fxs_ro_…` keys for
   dashboards and monitors.
 - **Trading** — market & pending orders, modify, close, close-all, plus
@@ -438,27 +438,31 @@ stream.on('trade', ({ data }) => {
 
 Every failure rejects with a subclass of `FxSocketError`:
 
-| Error                              | When                                                               |
-| ---------------------------------- | ------------------------------------------------------------------ |
-| `AuthError`                        | missing/invalid API key                                            |
-| `ForbiddenError`                   | key not allowed to do this (read-only key on a mutating call)      |
-| `RateLimitError`                   | rate limited (`.retryAfter`)                                       |
-| `ValidationError`                  | malformed request (`.code`: `invalid_batch`, `unknown_account`, …) |
-| `IdempotencyError`                 | batch refused because of its `Idempotency-Key` (`.code`)           |
-| `NotFoundError`                    | account/resource not found                                         |
-| `PaymentRequiredError`             | base for every 402 below (plan / balance doesn't allow it)         |
-| `AccountCapError`                  | plan account limit reached (`.cap`, `.current`)                    |
-| `NoSubscriptionError`              | no plan permits linking accounts                                   |
-| `InsufficientBalanceError`         | prepaid balance too low (`.shortfallEurCents`, `.shortfallEur`)    |
-| `SeatLapsedError`                  | seats lapsed, existing accounts unseated — renew first             |
-| `DuplicateAccountError`            | account already linked                                             |
-| `SlotsFullError`                   | every purchased private-server slot is taken (`.used`, `.cap`)     |
-| `ConnectFailedError`               | broker rejected the login                                          |
-| `TerminalNotReadyError`            | terminal not provisioned / not ready                               |
-| `TerminalTimeoutError`             | the terminal didn't answer in time                                 |
-| `UnsupportedOnPlatformError`       | feature not available on this platform                             |
-| `StreamError`                      | WebSocket dropped, or could not be opened                          |
-| `ConnectionError` / `TimeoutError` | the request never completed                                        |
+| Error                              | When                                                                |
+| ---------------------------------- | ------------------------------------------------------------------- |
+| `AuthError`                        | missing/invalid API key                                             |
+| `ForbiddenError`                   | key not allowed to do this (read-only key on a mutating call)       |
+| `RateLimitError`                   | rate limited (`.retryAfter`)                                        |
+| `ValidationError`                  | malformed request (`.code`: `invalid_batch`, `unknown_account`, …)  |
+| `IdempotencyError`                 | batch refused because of its `Idempotency-Key` (`.code`)            |
+| `NotFoundError`                    | account/resource not found                                          |
+| `PaymentRequiredError`             | base for every 402 below (plan / balance doesn't allow it)          |
+| `AccountCapError`                  | plan account limit reached (`.cap`, `.current`)                     |
+| `NoSubscriptionError`              | no plan permits linking accounts                                    |
+| `InsufficientBalanceError`         | prepaid balance too low (`.shortfallEurCents`, `.shortfallEur`)     |
+| `SeatLapsedError`                  | seats lapsed, existing accounts unseated — renew first              |
+| `DuplicateAccountError`            | account already linked                                              |
+| `SlotsFullError`                   | every purchased private-server slot is taken (`.used`, `.cap`)      |
+| `ServerLimitError`                 | you already own the maximum number of private servers               |
+| `AccountsExceedTargetError`        | resize below the accounts already on the server                     |
+| `AlreadyLapsedError`               | the paid period ran out — a cancel can no longer be resumed         |
+| `NotBalanceFundedError`            | card-/crypto-funded server (a `ForbiddenError`) — use the dashboard |
+| `ConnectFailedError`               | broker rejected the login                                           |
+| `TerminalNotReadyError`            | terminal not provisioned / not ready                                |
+| `TerminalTimeoutError`             | the terminal didn't answer in time                                  |
+| `UnsupportedOnPlatformError`       | feature not available on this platform                              |
+| `StreamError`                      | WebSocket dropped, or could not be opened                           |
+| `ConnectionError` / `TimeoutError` | the request never completed                                         |
 
 ```ts
 import { AccountCapError, InsufficientBalanceError } from '@fxsocket/sdk';
@@ -485,21 +489,19 @@ import { FxSocket, PrivateAccountStatus, SlotsFullError } from '@fxsocket/sdk';
 
 const fx = new FxSocket({ apiKey: 'fxs_live_…', verifyTerminalTls: false });
 
-const [server] = await fx.privateServers.list();
+let [server] = await fx.privateServers.list();
 console.log(server.name, server.status, `${server.usedSlots}/${server.purchasedSlots}`);
+
+const credentials = { server: 'ICMarkets-Demo', login: 1150125, password: '…' };
 
 let account;
 try {
-  account = await fx.privateServers.addAccount(server, {
-    server: 'ICMarkets-Demo',
-    login: 1150125,
-    password: '…',
-  });
+  account = await fx.privateServers.addAccount(server, credentials);
 } catch (error) {
-  if (error instanceof SlotsFullError) {
-    console.log(`Server full (${error.used}/${error.cap}) — raise the limit.`);
-  }
-  throw error;
+  if (!(error instanceof SlotsFullError)) throw error;
+  console.log(`Server full (${error.used}/${error.cap}) — buying another slot`);
+  server = await fx.privateServers.resize(server, { slots: server.purchasedSlots + 1 });
+  account = await fx.privateServers.addAccount(server, credentials);
 }
 
 // Poll until the on-server agent has the terminal up, then trade as usual.
@@ -520,9 +522,83 @@ Accounts on a private server are traded and streamed exactly like shared-cluster
 accounts — their `restUrl` / `wsUrl` simply point at the server's dedicated IP.
 The server presents a self-signed certificate, so reach it with
 `new FxSocket({ verifyTerminalTls: false })`, or per call with
-`fx.terminal(account, { verify: false })`. _Purchasing_ a server, canceling, and
-slot changes happen in the dashboard; the API deliberately exposes no billing
-operations.
+`fx.terminal(account, { verify: false })`.
+
+`server.cancelAtPeriodEnd` is `true` once a server has been told to stop instead
+of renewing; it then runs until `server.periodEnd` and expires.
+
+### Buying, resizing and canceling
+
+`fx.privateServers.regions()` returns where servers may run, how big they may be
+and what that costs — call it before buying rather than hardcoding slugs:
+
+```ts
+const options = await fx.privateServers.regions();
+if (options.enabled) {
+  console.log(options.regionCodes); // ['fra1', 'lon1', …]
+  console.log(options.maxSlots, options.maxServers);
+  console.log(options.monthlyPriceEur(3)); // 45 — three slots for a month
+}
+```
+
+`create()` buys one, charged to the prepaid balance immediately. It comes back
+`provisioning`; poll `get()` until it is `ready`, usually a couple of minutes:
+
+```ts
+import {
+  InsufficientBalanceError,
+  PrivateServerStatus,
+  ServerLimitError,
+} from '@fxsocket/sdk';
+
+let server;
+try {
+  server = await fx.privateServers.create({
+    slots: 2,
+    region: 'fra1',
+    name: 'prop-guard',
+  });
+} catch (error) {
+  if (error instanceof InsufficientBalanceError) {
+    console.log(`Top up ${error.shortfallEur} EUR first`);
+  } else if (error instanceof ServerLimitError) {
+    console.log(`Already own the maximum (${options.maxServers})`);
+  }
+  throw error;
+}
+
+while (server.status !== PrivateServerStatus.READY) {
+  await new Promise((r) => setTimeout(r, 10_000));
+  server = await fx.privateServers.get(server);
+}
+```
+
+`resize()` changes the slot count. Increases are prorated over the rest of the
+period and charged now (the renewal date doesn't move); decreases are free and
+apply at the next renewal, so paid-for capacity is never destroyed mid-month.
+Shrinking below the accounts already on the server raises
+`AccountsExceedTargetError` — remove accounts first:
+
+```ts
+server = await fx.privateServers.resize(server, { slots: 4 });
+```
+
+`cancel()` stops the server renewing: it runs until `periodEnd`, then expires.
+`resume()` undoes that while the period lasts (afterwards the machine is gone and
+`AlreadyLapsedError` is raised). `delete()` destroys the machine and every account
+on it right away, with **no refund** for the rest of the prepaid month — prefer
+`cancel()` unless you really want it gone now:
+
+```ts
+server = await fx.privateServers.cancel(server); // stop at periodEnd
+server = await fx.privateServers.resume(server); // changed your mind
+await fx.privateServers.delete(server); // irreversible, no refund
+```
+
+All of these move the prepaid balance, so they only work on balance-funded
+servers — a card- or crypto-funded one raises `NotBalanceFundedError` (a
+`ForbiddenError` subclass) and is managed from the dashboard. Read-only
+`fxs_ro_…` keys get a plain `ForbiddenError`.
 
 ## Wallet
 
@@ -545,8 +621,9 @@ if (!wallet.coversUpcoming) console.log(`top up at least ${wallet.shortfallEur} 
 
 Affordability is cumulative — with 24 EUR and three 12 EUR renewals the first two
 are covered and the third is not — so `shortfallEur` is the total gap, not the
-size of any single charge. Topping up happens in the dashboard; the SDK
-deliberately exposes no payment operations.
+size of any single charge. Topping up happens in the dashboard; the balance is
+only ever _spent_ through the SDK (account seats and `privateServers.create()` /
+`resize()`), never topped up.
 
 ## Timestamps
 
