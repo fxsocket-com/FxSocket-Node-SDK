@@ -3,16 +3,17 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  checkTimeframe,
   coerceOperation,
   coerceTimeframe,
   decodeBridgeHealth,
   FxSocket,
+  MT5_ONLY_TIMEFRAMES,
   OrderOperation,
   TerminalClient,
   TerminalNotReadyError,
   TerminalTimeoutError,
   Timeframe,
-  UnsupportedOnPlatformError,
   ValidationError,
   type Account,
   type Platform,
@@ -95,6 +96,35 @@ describe('coerceTimeframe', () => {
 
   it('rejects an unknown timeframe', () => {
     expect(() => coerceTimeframe('7s')).toThrow(/Unknown timeframe/);
+  });
+
+  it('lists exactly the timeframes the terminal API accepts', () => {
+    // The nine labels the MT4 and MT5 terminal APIs parse (REST + `bars`).
+    expect(Object.values(Timeframe)).toEqual([
+      'M1',
+      'M5',
+      'M15',
+      'M30',
+      'H1',
+      'H4',
+      'D1',
+      'W1',
+      'MN1',
+    ]);
+  });
+
+  it.each(['H6', 'M2', 'h12', '2h', '3min'])(
+    'rejects %s, which the terminal API does not serve',
+    (value) => {
+      expect(() => coerceTimeframe(value)).toThrow(ValidationError);
+      expect(() => coerceTimeframe(value)).toThrow(/M1, M5, M15/);
+    },
+  );
+
+  it('keeps the deprecated platform shims harmless', () => {
+    expect(MT5_ONLY_TIMEFRAMES.size).toBe(0);
+    expect(() => checkTimeframe(Timeframe.M5, 'mt4')).not.toThrow();
+    expect(() => checkTimeframe('H6' as Timeframe, 'mt5')).toThrow(ValidationError);
   });
 });
 
@@ -359,13 +389,16 @@ describe('market data', () => {
     expect(query.has('to')).toBe(false);
   });
 
-  it('rejects an MT5-only timeframe on MT4 before any request', async () => {
-    const route = mock.get('/PriceHistory', { status: 200, json: [] });
-    await expect(terminal('mt4').priceHistory('EURUSD', 'H6')).rejects.toThrow(
-      UnsupportedOnPlatformError,
-    );
-    expect(route.called).toBe(false);
-  });
+  it.each<Platform>(['mt4', 'mt5'])(
+    'rejects an unsupported timeframe on %s before any request',
+    async (platform) => {
+      const route = mock.get('/PriceHistory', { status: 200, json: [] });
+      await expect(terminal(platform).priceHistory('EURUSD', 'H6')).rejects.toThrow(
+        ValidationError,
+      );
+      expect(route.called).toBe(false);
+    },
+  );
 
   it('decodes a quote', async () => {
     mock.get('/getQuote', {

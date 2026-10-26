@@ -10,7 +10,6 @@ import {
   parseEvent,
   Stream,
   StreamError,
-  UnsupportedOnPlatformError,
   ValidationError,
   withApiKey,
   type StreamEvent,
@@ -312,12 +311,13 @@ describe('subscription validation', () => {
     );
   });
 
-  it('rejects an MT5-only timeframe on MT4', async () => {
-    const s = stream('ws://x/ws', { platform: 'mt4' });
-    await expect(s.subscribeBars('EURUSD', 'H6')).rejects.toThrow(
-      UnsupportedOnPlatformError,
-    );
-  });
+  it.each(['mt4', 'mt5'] as const)(
+    'rejects an unsupported timeframe on %s',
+    async (platform) => {
+      const s = stream('ws://x/ws', { platform });
+      await expect(s.subscribeBars('EURUSD', 'H6')).rejects.toThrow(ValidationError);
+    },
+  );
 
   it('requires a symbol for prices', async () => {
     const s = stream('ws://x/ws');

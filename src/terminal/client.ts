@@ -4,11 +4,10 @@
  * One {@link TerminalClient} is bound to a single account's terminal endpoint
  * (`Account.restUrl`).
  *
- * Platform awareness is enforced **client-side** before the request goes out:
- * MT5-only timeframes (`M2`/`M3`/`H2`/`H6`/`H8`/`H12`) don't exist on MT4, so
- * the SDK raises {@link UnsupportedOnPlatformError} rather than letting the
- * terminal answer 400. (Order *operations*, including stop-limit, are accepted
- * by both platforms' terminal APIs, so they are not gated.)
+ * MT4 and MT5 share one interface with nothing gated by platform: both terminal
+ * APIs accept the same nine timeframes (see {@link Timeframe}) and all eight
+ * order operations, stop-limit included. A timeframe outside that set raises
+ * {@link ValidationError} before the request goes out.
  *
  * Order inputs are validated client-side to fail fast and, above all, safely —
  * see `validate.ts`. No request is auto-retried: order send/modify/close must
@@ -58,7 +57,6 @@ import type {
   TimeInput,
 } from '../types.js';
 import {
-  checkTimeframe,
   coerceOperation,
   coerceTimeframe,
   compact,
@@ -244,7 +242,6 @@ export class TerminalClient {
     range: TimeRange = {},
   ): Promise<Candle[]> {
     const tf = coerceTimeframe(timeframe);
-    checkTimeframe(tf, this.platform);
     const params = compact({
       symbol,
       timeframe: tf,

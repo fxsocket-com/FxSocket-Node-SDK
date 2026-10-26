@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-26
+
+Matches [FxSocket Python SDK](https://github.com/fxsocket-com/FxSocket-Python-SDK)
+0.8.0.
+
+### Removed
+
+- `Timeframe.M2`, `M3`, `H2`, `H6`, `H8` and `H12`, and the `2min`, `3min`,
+  `2h`, `6h`, `8h` and `12h` aliases (also dropped from `TimeframeAlias`). The
+  SDK treated them as MT5-only, but neither terminal API serves them: MT4 and
+  MT5 both accept exactly `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`, `W1` and
+  `MN1`, in REST `priceHistory` and on the `bars` stream. On an MT5 account they
+  passed the SDK and the terminal refused them (HTTP 400 from `priceHistory`,
+  an `error` frame and no bars from the stream).
+
+  They are removed rather than kept and rejected on both platforms, so that
+  `Timeframe` lists exactly what the server accepts: `Object.values(Timeframe)`
+  gives the usable set, and `Timeframe.H2` is now a compile error instead of a
+  runtime failure. The only code this breaks is code that could never succeed.
+
+### Changed
+
+- A timeframe outside those nine now throws `ValidationError` on both
+  platforms before anything is sent, and the message lists the accepted
+  labels. On MT4 the six removed ones used to throw
+  `UnsupportedOnPlatformError`, so code that caught that for timeframes should
+  catch `ValidationError` instead. Nothing throws `UnsupportedOnPlatformError`
+  now; it stays exported.
+
+### Deprecated
+
+- `MT5_ONLY_TIMEFRAMES` is always empty, and `checkTimeframe()` no longer looks
+  at the platform (its second argument is optional and ignored; it only checks
+  the timeframe is one of the nine). Both will be removed in 1.0.
+
 ## [0.7.0] - 2026-09-14
 
 Matches [FxSocket Python SDK](https://github.com/fxsocket-com/FxSocket-Python-SDK)
@@ -97,5 +132,6 @@ WebSocket server:
   `maxQueueSize` (10,000 by default), emitting a `lag` event, so a fast tick
   feed cannot grow memory without bound.
 
+[0.8.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.8.0
 [0.7.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.7.0
 [0.6.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.6.0

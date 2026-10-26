@@ -223,8 +223,11 @@ Inputs are validated client-side before they're sent. One guard worth knowing: i
 rejected — pass `clearStopLoss: true` to remove one deliberately, while omitting
 the field keeps the current value.
 
-MT4 and MT5 share one interface. MT5-only timeframes (`M2`, `M3`, `H2`, `H6`,
-`H8`, `H12`) raise `UnsupportedOnPlatformError` on MT4 before any request.
+MT4 and MT5 share one interface, timeframes included. Both accept the same nine:
+`M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`, `W1`, `MN1` (or `1min`, `5min`,
+`15min`, `30min`, `1h`, `4h`, `1d`, `1w`, `1month`). MT5's other periods, such
+as `H2` or `H12`, aren't served by the terminal API, so anything else throws
+`ValidationError` before any request.
 
 > **Always bound `priceHistory`.** Without `from`/`to` the terminal asks the
 > broker for its _entire_ history for that timeframe — a million M1 bars on a

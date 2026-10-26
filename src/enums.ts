@@ -258,22 +258,17 @@ export type HealthStatus = (typeof HealthStatus)[keyof typeof HealthStatus];
 /**
  * Candle timeframes.
  *
- * The MT5-only members (`M2`, `M3`, `H2`, `H6`, `H8`, `H12`) are rejected
- * client-side for MT4 accounts.
+ * Exactly the nine the terminal API accepts, on MT4 and MT5 alike (REST
+ * `priceHistory` and the `bars` stream). MT5's other native periods (`M2`,
+ * `H2`, `H12`, …) are not exposed by the terminal API, so they are not members.
  */
 export const Timeframe = {
   M1: 'M1',
-  M2: 'M2',
-  M3: 'M3',
   M5: 'M5',
   M15: 'M15',
   M30: 'M30',
   H1: 'H1',
-  H2: 'H2',
   H4: 'H4',
-  H6: 'H6',
-  H8: 'H8',
-  H12: 'H12',
   D1: 'D1',
   W1: 'W1',
   MN1: 'MN1',
@@ -282,22 +277,7 @@ export type Timeframe = (typeof Timeframe)[keyof typeof Timeframe];
 
 /** Human timeframe aliases accepted wherever a {@link Timeframe} is. */
 export type TimeframeAlias =
-  | '1min'
-  | '2min'
-  | '3min'
-  | '5min'
-  | '15min'
-  | '30min'
-  | '1h'
-  | '2h'
-  | '4h'
-  | '6h'
-  | '8h'
-  | '12h'
-  | '1d'
-  | '1w'
-  | '1month'
-  | '1mn';
+  '1min' | '5min' | '15min' | '30min' | '1h' | '4h' | '1d' | '1w' | '1month' | '1mn';
 
 /**
  * Anything accepted where a timeframe is expected: the canonical label, a
@@ -305,15 +285,11 @@ export type TimeframeAlias =
  */
 export type TimeframeInput = Timeframe | TimeframeAlias | (string & {});
 
-/** Timeframes that only MT5 supports. */
-export const MT5_ONLY_TIMEFRAMES: ReadonlySet<Timeframe> = new Set([
-  Timeframe.M2,
-  Timeframe.M3,
-  Timeframe.H2,
-  Timeframe.H6,
-  Timeframe.H8,
-  Timeframe.H12,
-]);
+/**
+ * @deprecated Always empty: both platforms accept every {@link Timeframe}.
+ * Kept so existing imports compile; will be removed in 1.0.
+ */
+export const MT5_ONLY_TIMEFRAMES: ReadonlySet<Timeframe> = new Set<Timeframe>();
 
 /** Streaming topics the terminal WebSocket understands. */
 export const StreamTopic = {

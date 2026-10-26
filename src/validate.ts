@@ -9,7 +9,6 @@
  */
 
 import {
-  MT5_ONLY_TIMEFRAMES,
   OrderOperation,
   PENDING_OPERATIONS,
   STOP_LIMIT_OPERATIONS,
@@ -18,7 +17,7 @@ import {
   type Platform,
   type TimeframeInput,
 } from './enums.js';
-import { UnsupportedOnPlatformError, ValidationError } from './errors.js';
+import { ValidationError } from './errors.js';
 import type { TimeInput } from './types.js';
 
 const OPERATION_BY_NORMALIZED = new Map<string, OrderOperation>(
@@ -27,17 +26,11 @@ const OPERATION_BY_NORMALIZED = new Map<string, OrderOperation>(
 
 const TIMEFRAME_ALIASES = new Map<string, Timeframe>([
   ['1min', Timeframe.M1],
-  ['2min', Timeframe.M2],
-  ['3min', Timeframe.M3],
   ['5min', Timeframe.M5],
   ['15min', Timeframe.M15],
   ['30min', Timeframe.M30],
   ['1h', Timeframe.H1],
-  ['2h', Timeframe.H2],
   ['4h', Timeframe.H4],
-  ['6h', Timeframe.H6],
-  ['8h', Timeframe.H8],
-  ['12h', Timeframe.H12],
   ['1d', Timeframe.D1],
   ['1w', Timeframe.W1],
   ['1month', Timeframe.MN1],
@@ -71,7 +64,10 @@ export function coerceTimeframe(value: TimeframeInput): Timeframe {
   if (canonical !== undefined) return canonical;
   const alias = TIMEFRAME_ALIASES.get(raw.toLowerCase());
   if (alias === undefined) {
-    throw new ValidationError(`Unknown timeframe: ${inspect(value)}`);
+    const supported = Object.values(Timeframe).join(', ');
+    throw new ValidationError(
+      `Unknown timeframe: ${inspect(value)}; the terminal API accepts ${supported}`,
+    );
   }
   return alias;
 }
@@ -82,13 +78,15 @@ export function coercePlatform(value: unknown): Platform {
   throw new ValidationError(`platform must be one of mt4, mt5, got ${inspect(value)}`);
 }
 
-/** Reject an MT5-only timeframe on an MT4 account, before any request. */
-export function checkTimeframe(timeframe: Timeframe, platform: Platform): void {
-  if (platform === 'mt4' && MT5_ONLY_TIMEFRAMES.has(timeframe)) {
-    throw new UnsupportedOnPlatformError(
-      `${timeframe} is an MT5-only timeframe; not available on MT4.`,
-    );
-  }
+/**
+ * Throw `ValidationError` unless `timeframe` is one the terminal API accepts.
+ *
+ * @deprecated MT4 and MT5 accept the same timeframes, so there is nothing
+ * platform-specific left to check; use {@link coerceTimeframe}. Kept so
+ * existing imports compile; will be removed in 1.0.
+ */
+export function checkTimeframe(timeframe: Timeframe, _platform?: Platform): void {
+  coerceTimeframe(timeframe);
 }
 
 export function requirePositiveVolume(volume: number): void {

@@ -234,7 +234,9 @@ export class TerminalTimeoutError extends FxSocketError {}
 /**
  * A requested feature doesn't exist on the account's platform.
  *
- * Enforced client-side — e.g. MT5-only timeframes on an MT4 account.
+ * Nothing throws it at the moment: the MT4 and MT5 terminal APIs accept the
+ * same timeframes and order operations. It stays exported for platform gaps
+ * that need a client-side guard later.
  */
 export class UnsupportedOnPlatformError extends FxSocketError {}
 
