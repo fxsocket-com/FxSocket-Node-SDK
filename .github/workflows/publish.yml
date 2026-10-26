@@ -3,6 +3,9 @@ name: publish
 # Two paths, both using npm Trusted Publishing (OIDC — no long-lived tokens):
 #   • Manual run (Actions ▸ publish ▸ "Run workflow")  -> dry run, publishes nothing
 #   • Push a version tag, e.g.  git tag v0.6.0 && git push --tags  -> npm
+# Trusted publishing needs npm 11.5.1+ on the runner, and a trusted publisher
+# on npmjs.com for @fxsocket/sdk naming this repo, publish.yml and the `npm`
+# environment.
 on:
   workflow_dispatch: {}
   push:
@@ -61,6 +64,10 @@ jobs:
           node-version: '22'
           cache: npm
           registry-url: https://registry.npmjs.org
+      # Node 22 bundles npm 10, which can't publish via OIDC and fails with
+      # ENEEDAUTH (v0.7.0 and v0.8.0 had to be published by hand).
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@^11.5.1
       - run: npm ci
       - run: npm run build
       - name: Publish
