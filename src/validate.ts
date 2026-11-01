@@ -17,7 +17,7 @@ import {
   type Platform,
   type TimeframeInput,
 } from './enums.js';
-import { ValidationError } from './errors.js';
+import { UnsupportedOnPlatformError, ValidationError } from './errors.js';
 import type { TimeInput } from './types.js';
 
 const OPERATION_BY_NORMALIZED = new Map<string, OrderOperation>(
@@ -124,6 +124,97 @@ export function validateOrderSend(
   }
 }
 
+/**
+ * Refuse what MT4 cannot do, before anything is sent: it has no stop-limit
+ * order type. Its terminal API rejects `*StopLimit` operations (400
+ * `MRPC_UNSUPPORTED`) and would silently ignore a `stopLimitPrice` on modify.
+ */
+export function rejectUnsupportedOnPlatform(
+  platform: Platform,
+  fields: { operation?: OrderOperation; stopLimitPrice?: number },
+): void {
+  if (platform !== 'mt4') return;
+  if (fields.operation !== undefined && STOP_LIMIT_OPERATIONS.has(fields.operation)) {
+    throw new UnsupportedOnPlatformError(
+      `${fields.operation} orders are not supported on MT4 (it has no stop-limit order type)`,
+    );
+  }
+  if (fields.stopLimitPrice !== undefined) {
+    throw new UnsupportedOnPlatformError(
+      'stopLimitPrice is not supported on MT4 (it has no stop-limit order type)',
+    );
+  }
+}
+
+/** Longest `clientOrderId` the terminal accepts, in characters. */
+export const CLIENT_ORDER_ID_MAX_LENGTH = 64;
+
+/** Throw `ValidationError` unless `value` is a usable `clientOrderId`. */
+export function validateClientOrderId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new ValidationError(`clientOrderId must be a string, got ${inspect(value)}`);
+  }
+  // The terminal counts characters (code points), not UTF-16 units.
+  const length = [...value].length;
+  if (length < 1 || length > CLIENT_ORDER_ID_MAX_LENGTH) {
+    throw new ValidationError(
+      `clientOrderId must be 1-${CLIENT_ORDER_ID_MAX_LENGTH} characters, got ${length}`,
+    );
+  }
+  return value;
+}
+
+/** Most symbols one `symbolSelect()` / `symbolInfos()` call takes. */
+export const MAX_BULK_SYMBOLS = 100;
+
+/** Validate the symbol list of a bulk call, before anything is sent. */
+export function validateSymbolList(symbols: unknown, where: string): string[] {
+  if (!Array.isArray(symbols)) {
+    throw new ValidationError(`${where}: symbols must be an array of symbol names`);
+  }
+  if (symbols.length === 0) {
+    throw new ValidationError(`${where}: symbols must not be empty`);
+  }
+  if (symbols.length > MAX_BULK_SYMBOLS) {
+    throw new ValidationError(
+      `${where}: at most ${MAX_BULK_SYMBOLS} symbols per call, got ${symbols.length}`,
+    );
+  }
+  for (const symbol of symbols) {
+    if (typeof symbol !== 'string' || symbol.trim() === '') {
+      throw new ValidationError(
+        `${where}: every symbol must be a non-empty string, got ${inspect(symbol)}`,
+      );
+    }
+    if (symbol.includes(',')) {
+      throw new ValidationError(
+        `${where}: a symbol name cannot contain a comma, got ${inspect(symbol)}`,
+      );
+    }
+  }
+  return symbols as string[];
+}
+
+/**
+ * Resolve an order's expiry to wire fields: `expiration` (broker server time)
+ * or `expirationUtc` (real UTC), never both.
+ */
+export function resolveExpiration(input: {
+  expiration?: TimeInput;
+  expirationUtc?: TimeInput;
+}): { expiration?: string; expirationUtc?: string } {
+  if (input.expiration !== undefined && input.expirationUtc !== undefined) {
+    throw new ValidationError(
+      'pass either expiration (broker server time) or expirationUtc, not both',
+    );
+  }
+  return {
+    expiration: formatTime(input.expiration),
+    expirationUtc: formatUtcTime(input.expirationUtc),
+  };
+}
+
 export interface ModifyInput {
   stopLoss?: number;
   takeProfit?: number;
@@ -207,6 +298,22 @@ export function formatTime(value: TimeInput | undefined): string | undefined {
     throw new ValidationError('an invalid Date cannot be sent as a timestamp');
   }
   return value.toISOString().slice(0, 19);
+}
+
+/**
+ * Serialize a real-UTC time input (`expirationUtc`).
+ *
+ * A `Date` is an instant, so it is rendered in UTC with a `Z`
+ * (`2030-01-01T21:30:00Z`, whole seconds). A string passes through verbatim;
+ * the terminal accepts ISO-8601 in UTC (`Z` or `+00:00`, or no zone).
+ */
+export function formatUtcTime(value: TimeInput | undefined): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!(value instanceof Date)) return String(value);
+  if (Number.isNaN(value.getTime())) {
+    throw new ValidationError('an invalid Date cannot be sent as a timestamp');
+  }
+  return `${value.toISOString().slice(0, 19)}Z`;
 }
 
 /** Require a whole number, the way the API's integer fields do. */

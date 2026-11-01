@@ -145,9 +145,22 @@ export class HttpTransport {
     path: string,
     options: RequestOptions = {},
   ): Promise<T> {
+    return (await this.send(method, path, options)).body as T;
+  }
+
+  /**
+   * Perform a request and return the whole successful response (status,
+   * lower-cased headers, decoded body), or throw a typed error. For replies
+   * whose headers carry data, like the terminal's trade replies.
+   */
+  async send(
+    method: HttpMethod,
+    path: string,
+    options: RequestOptions = {},
+  ): Promise<RawResponse> {
     const response = await this.raw(method, path, options);
     if (response.status >= 200 && response.status < 300) {
-      return response.body as T;
+      return response;
     }
     throw errorFromResponse(response as ErrorResponse);
   }

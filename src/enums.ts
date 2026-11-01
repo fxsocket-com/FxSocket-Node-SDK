@@ -29,9 +29,10 @@ export type TradingStatus = (typeof TradingStatus)[keyof typeof TradingStatus];
 /**
  * Order operation accepted by the terminal `/OrderSend`.
  *
- * All eight are accepted by both the MT4 and MT5 terminal APIs (the MT4
- * server's `parse_operation` maps `BuyStopLimit`/`SellStopLimit` too), so the
- * SDK does not gate operations by platform.
+ * MT5 accepts all eight. MT4 has no stop-limit order type: its terminal API
+ * refuses `BuyStopLimit` / `SellStopLimit` (HTTP 400 `MRPC_UNSUPPORTED`), so on
+ * an MT4 account the SDK throws {@link UnsupportedOnPlatformError} for them
+ * before anything is sent.
  */
 export const OrderOperation = {
   BUY: 'Buy',
@@ -242,9 +243,46 @@ export const DealEntry = {
   IN: 'In',
   OUT: 'Out',
   IN_OUT: 'InOut',
+  /** a close by an opposite position (MT5) */
+  OUT_BY: 'OutBy',
   UNKNOWN: 'Unknown',
 } as const;
 export type DealEntry = (typeof DealEntry)[keyof typeof DealEntry];
+
+/**
+ * One step in the life of a pending order (`OrderEventData.event`, on the
+ * `orders` stream).
+ *
+ * `TRIGGERED` means the order filled: the event's `position` is the position
+ * the fill opened or added to (on MT4, the order's own ticket).
+ */
+export const OrderEventKind = {
+  PLACED: 'placed',
+  /** price, stops, expiry, volume or type changed */
+  MODIFIED: 'modified',
+  /** cancelled */
+  DELETED: 'deleted',
+  EXPIRED: 'expired',
+  TRIGGERED: 'triggered',
+} as const;
+export type OrderEventKind = (typeof OrderEventKind)[keyof typeof OrderEventKind];
+
+/**
+ * How a pending order expires (`PendingOrder.expirationMode`), and the values
+ * of `SymbolInfo.expirationModes` (what the broker accepts for a symbol). MT4
+ * knows only `GTC` and `SPECIFIED`.
+ */
+export const ExpirationMode = {
+  /** good till cancelled */
+  GTC: 'gtc',
+  /** until the end of the trading day */
+  DAY: 'day',
+  /** until a given date and time */
+  SPECIFIED: 'specified',
+  /** until the end of a given day */
+  SPECIFIED_DAY: 'specifiedDay',
+} as const;
+export type ExpirationMode = (typeof ExpirationMode)[keyof typeof ExpirationMode];
 
 /** Roll-up status reported by the terminal `/status` endpoint. */
 export const HealthStatus = {
@@ -298,8 +336,63 @@ export const StreamTopic = {
   ACCOUNT: 'account',
   POSITIONS: 'positions',
   TRADES: 'trades',
+  ORDERS: 'orders',
   TERMINAL: 'terminal',
 } as const;
 export type StreamTopic = (typeof StreamTopic)[keyof typeof StreamTopic];
 
 export const STREAM_TOPICS: ReadonlySet<string> = new Set(Object.values(StreamTopic));
+
+/**
+ * The fixed `error` codes of the terminal API (`FxSocketError.code` on an error
+ * from a {@link TerminalClient}). Branch on these, never on the message.
+ *
+ * Bridges before MT5 0.17.0 / MT4 0.15.0 answered most failures with the
+ * generic `MRPC` code; it is kept here for them.
+ */
+export const TerminalErrorCode = {
+  /** 401: missing or wrong API key */
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  /** 403: a read-only key on a trading route */
+  READ_ONLY_KEY: 'READ_ONLY_KEY',
+  /** 400: bad request parameters */
+  MRPC_VALIDATION: 'MRPC_VALIDATION',
+  /** 400: no such order or position */
+  MRPC_UNKNOWN_TICKET: 'MRPC_UNKNOWN_TICKET',
+  /** 400: no such symbol */
+  MRPC_UNKNOWN_SYMBOL: 'MRPC_UNKNOWN_SYMBOL',
+  /** 400: timeframe label not recognized */
+  MRPC_BAD_TIMEFRAME: 'MRPC_BAD_TIMEFRAME',
+  /** 400: the platform cannot do this (MT4: stop-limit orders) */
+  MRPC_UNSUPPORTED: 'MRPC_UNSUPPORTED',
+  /** 500: the symbol has no quote yet (select it first) */
+  MRPC_SYMBOL_NOT_QUOTING: 'MRPC_SYMBOL_NOT_QUOTING',
+  /** 500: another request for this ticket is still at the dealer */
+  MRPC_TICKET_BUSY: 'MRPC_TICKET_BUSY',
+  /** 409: `clientOrderId` already used for a different order */
+  MRPC_CLIENT_ORDER_ID_REUSED: 'MRPC_CLIENT_ORDER_ID_REUSED',
+  /** 503: no trade EA has registered yet */
+  MRPC_TRADE_EA_NOT_READY: 'MRPC_TRADE_EA_NOT_READY',
+  /** 500: the trade EA stopped before sending the request (nothing executed) */
+  MRPC_TRADE_EA_STOPPED: 'MRPC_TRADE_EA_STOPPED',
+  /** 504: gave up before the terminal took the command (not executed) */
+  MRPC_ABANDONED: 'MRPC_ABANDONED',
+  /** 504: a read timed out */
+  MRPC_TIMEOUT: 'MRPC_TIMEOUT',
+  /** 504: a trade timed out after the terminal took it (it may have executed) */
+  MRPC_TRADE_OUTCOME_UNKNOWN: 'MRPC_TRADE_OUTCOME_UNKNOWN',
+  /** 500: the terminal could not produce the history */
+  MRPC_HISTORY_UNAVAILABLE: 'MRPC_HISTORY_UNAVAILABLE',
+  /** 500: the terminal could not produce the price history */
+  MRPC_PRICE_HISTORY_UNAVAILABLE: 'MRPC_PRICE_HISTORY_UNAVAILABLE',
+  /** 500: a margin/profit calculation failed */
+  MRPC_CALC_FAILED: 'MRPC_CALC_FAILED',
+  /** 500: bridge fault */
+  MRPC_INTERNAL: 'MRPC_INTERNAL',
+  /** 500: bridge fault */
+  MRPC_UNKNOWN_COMMAND: 'MRPC_UNKNOWN_COMMAND',
+  /** the generic code of bridges before MT5 0.17.0 / MT4 0.15.0 */
+  MRPC: 'MRPC',
+} as const;
+export type TerminalErrorCode =
+  (typeof TerminalErrorCode)[keyof typeof TerminalErrorCode];

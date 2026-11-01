@@ -6,6 +6,8 @@
  * `{error, message, command_id}` — onto typed errors.
  */
 
+import { TerminalErrorCode } from './enums.js';
+
 /** Everything the SDK knows about a failed HTTP response. */
 export interface ErrorResponse {
   /** HTTP status code. */
@@ -220,23 +222,60 @@ export class IdempotencyError extends FxSocketError {}
 export class ConnectFailedError extends FxSocketError {}
 
 /**
- * The account's terminal isn't reachable yet.
+ * The account's terminal isn't reachable yet, or has no trade EA to take an
+ * order.
  *
- * Raised on HTTP 503 (trade EA not registered) and when an account has no
- * `restUrl` — it is still provisioning, or is bridge-only and exposes no
- * per-account terminal API.
+ * Raised on HTTP 503 (trade EA not registered), on `MRPC_TRADE_EA_STOPPED`
+ * (the trade EA stopped before it sent the request, so nothing was executed
+ * and a retry is safe), and when an account has no `restUrl` (it is still
+ * provisioning, or is bridge-only and exposes no per-account terminal API).
  */
 export class TerminalNotReadyError extends FxSocketError {}
 
-/** The terminal didn't answer in time (HTTP 504 / `MRPC_TIMEOUT`). */
+/**
+ * The terminal didn't answer in time (HTTP 504).
+ *
+ * Base class for {@link TradeOutcomeUnknownError} and
+ * {@link TradeAbandonedError}, which tell a trade's two timeouts apart. Raised
+ * directly for `MRPC_TIMEOUT`, a read that timed out.
+ *
+ * On bridges older than MT5 0.17.0 / MT4 0.15.0 a trade that timed out after
+ * the terminal took it also answers `MRPC_TIMEOUT`, so on those a trade's
+ * `TerminalTimeoutError` may have executed: check `openedOrders()` before
+ * sending it again.
+ */
 export class TerminalTimeoutError extends FxSocketError {}
+
+/**
+ * A trade timed out after the terminal took it (HTTP 504
+ * `MRPC_TRADE_OUTCOME_UNKNOWN`). It **may have executed**.
+ *
+ * Never re-send it blindly. Reconcile through `openedOrders()` /
+ * `orderHistory()`, or re-send it with the same `clientOrderId`, which trades
+ * nothing if the first request went through and answers with its outcome.
+ */
+export class TradeOutcomeUnknownError extends TerminalTimeoutError {}
+
+/**
+ * The terminal never took the command (HTTP 504 `MRPC_ABANDONED`): nothing
+ * was executed, and sending it again is safe. A `clientOrderId` it carried is
+ * free to be used again.
+ */
+export class TradeAbandonedError extends TerminalTimeoutError {}
+
+/**
+ * The `clientOrderId` was already used for a different order (HTTP 409
+ * `MRPC_CLIENT_ORDER_ID_REUSED`). Nothing was sent. Ids are remembered for 10
+ * minutes; use a fresh one per order.
+ */
+export class ClientOrderIdReusedError extends FxSocketError {}
 
 /**
  * A requested feature doesn't exist on the account's platform.
  *
- * Nothing throws it at the moment: the MT4 and MT5 terminal APIs accept the
- * same timeframes and order operations. It stays exported for platform gaps
- * that need a client-side guard later.
+ * Thrown before anything is sent for a stop-limit order on MT4
+ * (`BuyStopLimit` / `SellStopLimit`, or `stopLimitPrice` on `orderModify`):
+ * MT4 has no stop-limit order type.
  */
 export class UnsupportedOnPlatformError extends FxSocketError {}
 
@@ -319,6 +358,9 @@ export function errorFromResponse(response: ErrorResponse): FxSocketError {
       return new AccountsExceedTargetError(message, common);
     }
     if (code === 'already_lapsed') return new AlreadyLapsedError(message, common);
+    if (code === TerminalErrorCode.MRPC_CLIENT_ORDER_ID_REUSED) {
+      return new ClientOrderIdReusedError(message, common);
+    }
     return new DuplicateAccountError(message, common);
   }
   if (status === 402) {
@@ -350,7 +392,17 @@ export function errorFromResponse(response: ErrorResponse): FxSocketError {
     }
     return new ValidationError(message, common);
   }
-  if (status === 503) return new TerminalNotReadyError(message, common);
-  if (status === 504) return new TerminalTimeoutError(message, common);
+  if (status === 503 || code === TerminalErrorCode.MRPC_TRADE_EA_STOPPED) {
+    return new TerminalNotReadyError(message, common);
+  }
+  if (status === 504) {
+    if (code === TerminalErrorCode.MRPC_TRADE_OUTCOME_UNKNOWN) {
+      return new TradeOutcomeUnknownError(message, common);
+    }
+    if (code === TerminalErrorCode.MRPC_ABANDONED) {
+      return new TradeAbandonedError(message, common);
+    }
+    return new TerminalTimeoutError(message, common);
+  }
   return new FxSocketError(message, common);
 }

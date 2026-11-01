@@ -14,10 +14,12 @@ import {
   decodeBatchOrderResult,
   decodeHealth,
   decodeOrderResult,
+  decodePendingOrder,
   decodePrivateServer,
   decodeReadOnlyKey,
   decodeTradeEvent,
   decodeWallet,
+  parseServerTiming,
 } from '../src/decode.js';
 
 describe('decodeAccount', () => {
@@ -181,5 +183,75 @@ describe('decodeTradeEvent', () => {
   it('computes net profit from profit, commission and swap', () => {
     const event = decodeTradeEvent({ profit: 10, commission: -2, swap: -0.5 });
     expect(event.netProfit).toBe(7.5);
+  });
+});
+
+describe('parseServerTiming', () => {
+  it('reads queue and exec durations', () => {
+    expect(parseServerTiming('queue;dur=1.2, exec;dur=40.3')).toEqual({
+      queueMs: 1.2,
+      execMs: 40.3,
+    });
+  });
+
+  it('tolerates spacing, case, order, quotes and extra metrics', () => {
+    expect(
+      parseServerTiming(' EXEC ; desc="dealer" ; dur="7" ,db;dur=3,  queue;DUR=0 '),
+    ).toEqual({ queueMs: 0, execMs: 7 });
+  });
+
+  it('is null without a header, and null per missing metric', () => {
+    expect(parseServerTiming(undefined)).toBeNull();
+    expect(parseServerTiming('')).toBeNull();
+    expect(parseServerTiming('queue;dur=2')).toEqual({ queueMs: 2, execMs: null });
+    expect(parseServerTiming('queue;dur=abc, exec')).toEqual({
+      queueMs: null,
+      execMs: null,
+    });
+  });
+});
+
+describe('0.17 fields on older bridges', () => {
+  it('defaults the new trade-reply fields', () => {
+    const result = decodeOrderResult({ success: true, retcode: 10009 });
+    expect(result.position).toBe(0);
+    expect(result.time).toBe('');
+    expect(result.timeUtc).toBeNull();
+    expect(result.remainderTicket).toBe(0);
+    expect(result.clientOrderId).toBeNull();
+    expect(result.idempotentReplayed).toBe(false);
+    expect(result.serverTiming).toBeNull();
+  });
+
+  it('defaults the new trade-event fields, positionVolume to unknown', () => {
+    const event = decodeTradeEvent({ deal: 1, order: 2, position: 2, time: 't' });
+    expect(event.sl).toBe(0);
+    expect(event.tp).toBe(0);
+    expect(event.positionVolume).toBe(-1);
+    expect(event.timeUtc).toBeNull();
+    expect(event.remainderTicket).toBe(0);
+    expect(event.remainderOf).toBe(0);
+  });
+
+  it('defaults the bridge pipeline fields', () => {
+    const { bridge } = decodeHealth({ status: 'ready', bridge: { version: '0.13.0' } });
+    expect(bridge.asyncTrades).toBe(false);
+    expect(bridge.tradeInFlight).toBe(0);
+    expect(bridge.oldestTradeInFlightAgeMs).toBe(-1);
+    expect(bridge.dealerRttMsEwma).toBe(-1);
+    expect(bridge.tradeRequestsSent).toBe(0);
+    expect(bridge.lateTradeVerdicts).toBe(0);
+    expect(bridge.tradeQueueDepth).toBe(0);
+    expect(bridge.nonTradeQueueDepth).toBe(0);
+    expect(bridge.tradeDeferred).toBe(0);
+  });
+
+  it('defaults a thin pending order', () => {
+    const order = decodePendingOrder({ ticket: 5, symbol: 'EURUSD' });
+    expect(order.type).toBe('BuyLimit');
+    expect(order.expirationMode).toBe('');
+    expect(order.expirationUtc).toBe('');
+    expect(order.timeUtc).toBeNull();
+    expect(order.stopLimitPrice).toBe(0);
   });
 });

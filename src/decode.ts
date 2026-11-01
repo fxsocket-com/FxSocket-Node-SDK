@@ -43,8 +43,11 @@ import type {
   HistoryTrade,
   MarginCalc,
   OpenedOrder,
+  OrderEventData,
   OrderLegResult,
   OrderResult,
+  PendingOrder,
+  PositionModifyData,
   PositionTrade,
   PrivateServer,
   PrivateServerAccount,
@@ -55,7 +58,11 @@ import type {
   Region,
   ScopedAccount,
   ServerTimezone,
+  ServerTiming,
   SymbolInfo,
+  SymbolInfoBatch,
+  SymbolInfoError,
+  SymbolSelectResult,
   TerminalHealth,
   TerminalStatus,
   TopUp,
@@ -104,10 +111,20 @@ export function bool(value: unknown, fallback = false): boolean {
 }
 
 /** An integer field that is genuinely nullable on the wire. */
-function intOrNull(value: unknown): number | null {
+export function intOrNull(value: unknown): number | null {
   if (value === undefined || value === null) return null;
   const parsed = num(value, Number.NaN);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+}
+
+/** A string field the bridge omits when it has no value (`timeUtc`). */
+function strOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+/** A list of strings; anything that is not a string is dropped. */
+function strList(value: unknown): string[] {
+  return asArray(value).filter((item): item is string => typeof item === 'string');
 }
 
 /** A UTC timestamp from the management API. */
@@ -552,6 +569,28 @@ export function decodeServerTimezone(raw: unknown): ServerTimezone {
   };
 }
 
+export function decodePendingOrder(raw: unknown): PendingOrder {
+  const w = asObject(raw);
+  return {
+    ticket: int(w['ticket']),
+    symbol: str(w['symbol']),
+    type: enumStr(w['type'], 'BuyLimit'),
+    volumeInitial: num(w['volumeInitial']),
+    volume: num(w['volume']),
+    price: num(w['price']),
+    stopLimitPrice: num(w['stopLimitPrice']),
+    sl: num(w['sl']),
+    tp: num(w['tp']),
+    expirationMode: enumStr(w['expirationMode'], ''),
+    expiration: str(w['expiration']),
+    expirationUtc: str(w['expirationUtc']),
+    magic: int(w['magic']),
+    comment: str(w['comment']),
+    time: str(w['time']),
+    timeUtc: strOrNull(w['timeUtc']),
+  };
+}
+
 // --------------------------------------------------------------------------- //
 // Terminal — market data
 // --------------------------------------------------------------------------- //
@@ -628,8 +667,37 @@ export function decodeSymbolInfo(raw: unknown): SymbolInfo {
     currencyBase: str(w['currencyBase']),
     currencyProfit: str(w['currencyProfit']),
     currencyMargin: str(w['currencyMargin']),
+    orderModes: strList(w['orderModes']),
+    expirationModes: strList(w['expirationModes']),
+    fillingModes: strList(w['fillingModes']),
     commissions: list(w['commissions'], decodeCommissionRule),
     sessions: list(w['sessions'], decodeTradingSession),
+  };
+}
+
+function decodeSymbolInfoError(raw: unknown): SymbolInfoError {
+  const w = asObject(raw);
+  return {
+    symbol: str(w['symbol']),
+    error: str(w['error']),
+    message: str(w['message']),
+  };
+}
+
+export function decodeSymbolInfoBatch(raw: unknown): SymbolInfoBatch {
+  const w = asObject(raw);
+  return {
+    symbols: list(w['symbols'], decodeSymbolInfo),
+    errors: list(w['errors'], decodeSymbolInfoError),
+  };
+}
+
+export function decodeSymbolSelectResult(raw: unknown): SymbolSelectResult {
+  const w = asObject(raw);
+  return {
+    symbol: str(w['symbol']),
+    selected: bool(w['selected']),
+    quoting: bool(w['quoting']),
   };
 }
 
@@ -651,7 +719,38 @@ export function decodeCandle(raw: unknown): Candle {
 // Terminal — trading
 // --------------------------------------------------------------------------- //
 
-export function decodeOrderResult(raw: unknown): OrderResult {
+/**
+ * Parse a `Server-Timing` header (`queue;dur=1.2, exec;dur=40.3`). `null` when
+ * the header is absent; a metric it does not report is `null`.
+ */
+export function parseServerTiming(header: string | undefined): ServerTiming | null {
+  if (header === undefined || header.trim() === '') return null;
+  const durations = new Map<string, number>();
+  for (const metric of header.split(',')) {
+    const [name, ...params] = metric.split(';').map((part) => part.trim());
+    if (!name) continue;
+    for (const param of params) {
+      const [key, value] = param.split('=').map((part) => part.trim());
+      if (key?.toLowerCase() !== 'dur' || value === undefined) continue;
+      const parsed = Number(value.replace(/^"|"$/g, ''));
+      if (value !== '' && Number.isFinite(parsed))
+        durations.set(name.toLowerCase(), parsed);
+    }
+  }
+  return {
+    queueMs: durations.get('queue') ?? null,
+    execMs: durations.get('exec') ?? null,
+  };
+}
+
+/**
+ * A trade reply. `headers` (lower-cased keys) carry `Idempotent-Replayed` and
+ * `Server-Timing`; without them those two fields keep their defaults.
+ */
+export function decodeOrderResult(
+  raw: unknown,
+  headers: Readonly<Record<string, string>> = {},
+): OrderResult {
   const w = asObject(raw);
   const success = bool(w['success']);
   const outcome: OrderOutcome | '' = enumStr(w['outcome'], '');
@@ -669,6 +768,14 @@ export function decodeOrderResult(raw: unknown): OrderResult {
     bid: num(w['bid']),
     ask: num(w['ask']),
     comment: str(w['comment']),
+    position: int(w['position']),
+    time: str(w['time']),
+    timeUtc: strOrNull(w['timeUtc']),
+    remainderTicket: int(w['remainderTicket']),
+    clientOrderId: strOrNull(w['clientOrderId']),
+    idempotentReplayed:
+      (headers['idempotent-replayed'] ?? '').trim().toLowerCase() === 'true',
+    serverTiming: parseServerTiming(headers['server-timing']),
     isNoChange,
     isEffective: success || isNoChange,
   };
@@ -760,6 +867,16 @@ export function decodeBridgeHealth(raw: unknown): BridgeHealth {
     // omitting the field — so the default must be -1, not 0.
     tradeEaHeartbeatAgeMs: int(w['tradeEaHeartbeatAgeMs'], -1),
     symbolsSynced: bool(w['symbolsSynced']),
+    asyncTrades: bool(w['asyncTrades']),
+    tradeInFlight: int(w['tradeInFlight']),
+    // -1 is the bridge's own "nothing in flight" / "no sample yet".
+    oldestTradeInFlightAgeMs: int(w['oldestTradeInFlightAgeMs'], -1),
+    dealerRttMsEwma: int(w['dealerRttMsEwma'], -1),
+    tradeRequestsSent: int(w['tradeRequestsSent']),
+    lateTradeVerdicts: int(w['lateTradeVerdicts']),
+    tradeQueueDepth: int(w['tradeQueueDepth']),
+    nonTradeQueueDepth: int(w['nonTradeQueueDepth']),
+    tradeDeferred: int(w['tradeDeferred']),
   };
 }
 
@@ -811,8 +928,42 @@ export function decodeTradeEvent(raw: unknown): TradeEvent {
     magic: int(w['magic']),
     comment: str(w['comment']),
     time: str(w['time']),
+    timeUtc: strOrNull(w['timeUtc']),
     degraded: bool(w['degraded']),
+    sl: num(w['sl']),
+    tp: num(w['tp']),
+    // -1 is the bridge's own "unknown", and what an older bridge implies by
+    // omitting the field.
+    positionVolume: num(w['positionVolume'], -1),
+    remainderTicket: int(w['remainderTicket']),
+    remainderOf: int(w['remainderOf']),
     netProfit: profit + commission + swap,
+  };
+}
+
+export function decodePositionModify(raw: unknown): PositionModifyData {
+  const w = asObject(raw);
+  return {
+    position: int(w['position']),
+    symbol: str(w['symbol']),
+    type: enumStr(w['type'], 'Buy'),
+    volume: num(w['volume']),
+    price: num(w['price']),
+    sl: num(w['sl']),
+    tp: num(w['tp']),
+    magic: int(w['magic']),
+    comment: str(w['comment']),
+    time: str(w['time']),
+    timeUtc: strOrNull(w['timeUtc']),
+  };
+}
+
+export function decodeOrderEvent(raw: unknown): OrderEventData {
+  const w = asObject(raw);
+  return {
+    ...decodePendingOrder(w),
+    event: enumStr(w['event'], 'modified'),
+    position: int(w['position']),
   };
 }
 

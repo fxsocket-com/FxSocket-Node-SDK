@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   checkTimeframe,
+  ClientOrderIdReusedError,
   coerceOperation,
   coerceTimeframe,
   decodeBridgeHealth,
@@ -14,6 +15,9 @@ import {
   TerminalNotReadyError,
   TerminalTimeoutError,
   Timeframe,
+  TradeAbandonedError,
+  TradeOutcomeUnknownError,
+  UnsupportedOnPlatformError,
   ValidationError,
   type Account,
   type Platform,
@@ -569,11 +573,27 @@ describe('orderSend', () => {
     expect(route.last.headers['content-type']).toBe('application/json');
   });
 
-  it('allows stop-limit orders on MT4', async () => {
-    // MT4's terminal API accepts BuyStopLimit/SellStopLimit, so the SDK must
-    // not block them client-side.
+  it('refuses stop-limit orders on MT4 before sending', async () => {
+    // MT4 has no stop-limit order type: its bridge answers 400
+    // MRPC_UNSUPPORTED, so the SDK refuses it client-side.
     const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
-    await terminal('mt4').orderSend({
+    for (const operation of ['BuyStopLimit', 'sell_stop_limit']) {
+      await expect(
+        terminal('mt4').orderSend({
+          symbol: 'EURUSD',
+          operation,
+          volume: 0.1,
+          price: 1.1,
+          stopLimitPrice: 1.09,
+        }),
+      ).rejects.toThrow(UnsupportedOnPlatformError);
+    }
+    expect(route.called).toBe(false);
+  });
+
+  it('allows stop-limit orders on MT5', async () => {
+    const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    await terminal('mt5').orderSend({
       symbol: 'EURUSD',
       operation: 'BuyStopLimit',
       volume: 0.1,
@@ -795,5 +815,334 @@ describe('FxSocket.terminal', () => {
     const fx = new FxSocket({ apiKey: 'fxs_live_k', dispatcher: mock.dispatcher });
     expect(() => fx.stream({ ...account(), wsUrl: '' })).toThrow(TerminalNotReadyError);
     await fx.close();
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// Bridge MT5 0.17.0 / MT4 0.15.0
+// --------------------------------------------------------------------------- //
+
+const PENDING_ROW = {
+  ticket: 501,
+  symbol: 'EURUSD',
+  type: 'BuyStopLimit',
+  volumeInitial: 0.2,
+  volume: 0.1,
+  price: 1.09,
+  stopLimitPrice: 1.088,
+  sl: 1.08,
+  tp: 1.1,
+  expirationMode: 'specified',
+  expiration: '2026-11-03T19:00:00.000Z',
+  expirationUtc: '2026-11-03T17:00:00Z',
+  magic: 77,
+  comment: 'copy',
+  time: '2026-10-29T18:00:00.123Z',
+  timeUtc: '2026-10-29T16:00:00.123Z',
+};
+
+describe('pendingOrders', () => {
+  it('decodes the active pending orders', async () => {
+    mock.get('/PendingOrders', {
+      status: 200,
+      json: [PENDING_ROW, { ticket: 502, symbol: 'GBPUSD', type: 'SellLimit' }],
+    });
+    const [first, second] = await terminal().pendingOrders();
+    expect(first).toEqual(PENDING_ROW);
+    expect(second!.expirationMode).toBe('');
+    expect(second!.timeUtc).toBeNull();
+  });
+});
+
+describe('symbolSelect / symbolInfos', () => {
+  it('selects symbols in one POST', async () => {
+    const route = mock.post('/SymbolSelect', {
+      status: 200,
+      json: [
+        { symbol: 'EURUSD', selected: true, quoting: true },
+        { symbol: 'NOPE', selected: false, quoting: false },
+      ],
+    });
+    const rows = await terminal().symbolSelect(['EURUSD', 'NOPE']);
+    expect(route.sent).toEqual({ symbols: ['EURUSD', 'NOPE'] });
+    expect(rows).toEqual([
+      { symbol: 'EURUSD', selected: true, quoting: true },
+      { symbol: 'NOPE', selected: false, quoting: false },
+    ]);
+  });
+
+  it('looks up many symbols with a comma list and keeps the misses', async () => {
+    const route = mock.get('/SymbolInfo', {
+      status: 200,
+      json: {
+        symbols: [
+          {
+            symbol: 'EURUSD',
+            digits: 5,
+            orderModes: ['market', 'limit', 'stop', 'stopLimit', 'sl', 'tp'],
+            expirationModes: ['gtc', 'day', 'specified', 'specifiedDay'],
+            fillingModes: ['fok', 'ioc'],
+          },
+        ],
+        errors: [
+          { symbol: 'NOPE', error: 'MRPC_UNKNOWN_SYMBOL', message: 'unknown symbol' },
+        ],
+      },
+    });
+    const batch = await terminal().symbolInfos(['EURUSD', 'NOPE']);
+    expect(route.last.query.get('symbols')).toBe('EURUSD,NOPE');
+    expect(route.last.query.has('symbol')).toBe(false);
+    expect(batch.symbols[0]!.fillingModes).toEqual(['fok', 'ioc']);
+    expect(batch.symbols[0]!.expirationModes).toContain('specifiedDay');
+    expect(batch.errors).toEqual([
+      { symbol: 'NOPE', error: 'MRPC_UNKNOWN_SYMBOL', message: 'unknown symbol' },
+    ]);
+  });
+
+  it('defaults the symbol modes to empty on older bridges', async () => {
+    mock.get('/SymbolInfo', { status: 200, json: { symbol: 'EURUSD' } });
+    const info = await terminal().symbolInfo('EURUSD');
+    expect(info.orderModes).toEqual([]);
+    expect(info.expirationModes).toEqual([]);
+    expect(info.fillingModes).toEqual([]);
+  });
+
+  it('validates the symbol list before sending', async () => {
+    const select = mock.post('/SymbolSelect', { status: 200, json: [] });
+    const info = mock.get('/SymbolInfo', { status: 200, json: {} });
+    const term = terminal();
+    const bad: unknown[] = [
+      'EURUSD', // a bare string is not a list
+      [],
+      Array.from({ length: 101 }, (_, i) => `S${i}`),
+      [''],
+      ['  '],
+      ['EURUSD', 7],
+      ['EURUSD,GBPUSD'],
+    ];
+    for (const symbols of bad) {
+      await expect(term.symbolSelect(symbols as string[])).rejects.toThrow(
+        ValidationError,
+      );
+      await expect(term.symbolInfos(symbols as string[])).rejects.toThrow(
+        ValidationError,
+      );
+    }
+    expect(select.called).toBe(false);
+    expect(info.called).toBe(false);
+    // Exactly 100 is fine.
+    await term.symbolSelect(Array.from({ length: 100 }, (_, i) => `S${i}`));
+    expect(select.callCount).toBe(1);
+  });
+});
+
+describe('trade replies (0.17)', () => {
+  it('decodes the new fields and the timing / replay headers', async () => {
+    mock.post('/OrderSend', {
+      status: 200,
+      json: {
+        ...ORDER_OK,
+        deal: 99,
+        position: 100,
+        time: '2026-10-29T18:00:00.456Z',
+        timeUtc: '2026-10-29T16:00:00.456Z',
+        remainderTicket: 0,
+        clientOrderId: 'copy-1',
+      },
+      headers: {
+        'Server-Timing': 'queue;dur=0.8, exec;dur=212.5',
+        'Idempotent-Replayed': 'true',
+      },
+    });
+    const result = await terminal().orderSend({
+      symbol: 'EURUSD',
+      operation: 'Buy',
+      volume: 0.1,
+      clientOrderId: 'copy-1',
+    });
+    expect(result.position).toBe(100);
+    expect(result.time).toBe('2026-10-29T18:00:00.456Z');
+    expect(result.timeUtc).toBe('2026-10-29T16:00:00.456Z');
+    expect(result.clientOrderId).toBe('copy-1');
+    expect(result.idempotentReplayed).toBe(true);
+    expect(result.serverTiming).toEqual({ queueMs: 0.8, execMs: 212.5 });
+  });
+
+  it('reads the headers on modify and close too, and defaults without them', async () => {
+    mock.post('/OrderModify', {
+      status: 200,
+      json: ORDER_OK,
+      headers: { 'server-timing': 'queue;dur=1, exec;dur=2' },
+    });
+    mock.post('/OrderClose', {
+      status: 200,
+      json: { ...ORDER_OK, remainderTicket: 123 },
+    });
+    const modified = await terminal().orderModify(100, { takeProfit: 1.2 });
+    expect(modified.serverTiming).toEqual({ queueMs: 1, execMs: 2 });
+    expect(modified.idempotentReplayed).toBe(false);
+    const closed = await terminal('mt4').orderClose(100, { volume: 0.05 });
+    expect(closed.remainderTicket).toBe(123);
+    expect(closed.serverTiming).toBeNull();
+    expect(closed.idempotentReplayed).toBe(false);
+  });
+
+  it('maps the trade 504s and a reused clientOrderId', async () => {
+    mock.post(
+      '/OrderSend',
+      { status: 504, json: { error: 'MRPC_TRADE_OUTCOME_UNKNOWN', message: 'm' } },
+      { status: 504, json: { error: 'MRPC_ABANDONED', message: 'm' } },
+      { status: 409, json: { error: 'MRPC_CLIENT_ORDER_ID_REUSED', message: 'm' } },
+    );
+    const send = () =>
+      terminal().orderSend({
+        symbol: 'EURUSD',
+        operation: 'Buy',
+        volume: 0.1,
+        clientOrderId: 'x',
+      });
+    await expect(send()).rejects.toThrow(TradeOutcomeUnknownError);
+    await expect(send()).rejects.toThrow(TradeAbandonedError);
+    await expect(send()).rejects.toThrow(ClientOrderIdReusedError);
+  });
+});
+
+describe('clientOrderId', () => {
+  it('is sent as given', async () => {
+    const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    await terminal().orderSend({
+      symbol: 'EURUSD',
+      operation: 'Buy',
+      volume: 0.1,
+      clientOrderId: 'copy-7f3a-0001',
+    });
+    expect(route.sent['clientOrderId']).toBe('copy-7f3a-0001');
+  });
+
+  it('must be 1-64 characters, counted as the terminal counts them', async () => {
+    const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    const send = (clientOrderId: unknown) =>
+      terminal().orderSend({
+        symbol: 'EURUSD',
+        operation: 'Buy',
+        volume: 0.1,
+        clientOrderId: clientOrderId as string,
+      });
+    await expect(send('')).rejects.toThrow(ValidationError);
+    await expect(send('x'.repeat(65))).rejects.toThrow(/1-64 characters/);
+    await expect(send(12)).rejects.toThrow(/must be a string/);
+    expect(route.called).toBe(false);
+
+    await send('x'.repeat(64));
+    // 64 emoji are 128 UTF-16 units but 64 characters: still accepted.
+    await send('😀'.repeat(64));
+    expect(route.callCount).toBe(2);
+  });
+});
+
+describe('expirationUtc', () => {
+  it('renders a Date in UTC with a Z and whole seconds', async () => {
+    const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    await terminal().orderSend({
+      symbol: 'EURUSD',
+      operation: 'BuyLimit',
+      volume: 0.1,
+      price: 1.07,
+      expirationUtc: new Date('2026-11-03T17:00:00.789Z'),
+    });
+    expect(route.sent['expirationUtc']).toBe('2026-11-03T17:00:00Z');
+    expect(route.sent).not.toHaveProperty('expiration');
+  });
+
+  it('passes a string through unchanged', async () => {
+    const route = mock.post('/OrderModify', { status: 200, json: ORDER_OK });
+    await terminal().orderModify(501, { expirationUtc: '2026-11-03T17:00:00+00:00' });
+    expect(route.sent).toEqual({
+      ticket: 501,
+      expirationUtc: '2026-11-03T17:00:00+00:00',
+    });
+  });
+
+  it('cannot be combined with expiration, on send or modify', async () => {
+    const send = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    const modify = mock.post('/OrderModify', { status: 200, json: ORDER_OK });
+    await expect(
+      terminal().orderSend({
+        symbol: 'EURUSD',
+        operation: 'BuyLimit',
+        volume: 0.1,
+        price: 1.07,
+        expiration: '2026-11-03T19:00:00',
+        expirationUtc: '2026-11-03T17:00:00Z',
+      }),
+    ).rejects.toThrow(/either expiration .* or expirationUtc/);
+    await expect(
+      terminal().orderModify(501, {
+        expiration: '2026-11-03T19:00:00',
+        expirationUtc: new Date(),
+      }),
+    ).rejects.toThrow(ValidationError);
+    expect(send.called).toBe(false);
+    expect(modify.called).toBe(false);
+  });
+
+  it('rejects an invalid Date', async () => {
+    mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    await expect(
+      terminal().orderSend({
+        symbol: 'EURUSD',
+        operation: 'BuyLimit',
+        volume: 0.1,
+        price: 1.07,
+        expirationUtc: new Date('not a date'),
+      }),
+    ).rejects.toThrow(/invalid Date/);
+  });
+});
+
+describe('MT4 stop-limit guard on modify', () => {
+  it('refuses stopLimitPrice on MT4 and sends it on MT5', async () => {
+    const route = mock.post('/OrderModify', { status: 200, json: ORDER_OK });
+    await expect(
+      terminal('mt4').orderModify(501, { stopLimitPrice: 1.088 }),
+    ).rejects.toThrow(UnsupportedOnPlatformError);
+    expect(route.called).toBe(false);
+
+    await terminal('mt5').orderModify(501, { stopLimitPrice: 1.088 });
+    expect(route.sent).toEqual({ ticket: 501, stopLimitPrice: 1.088 });
+    // A plain MT4 modify is untouched.
+    await terminal('mt4').orderModify(501, { price: 1.09 });
+    expect(route.sent).toEqual({ ticket: 501, price: 1.09 });
+  });
+});
+
+describe('bridge pipeline health', () => {
+  it('decodes the trade-pipeline fields of /status', () => {
+    const bridge = decodeBridgeHealth({
+      version: '0.17.0',
+      tradeEaReady: true,
+      tradeEaHeartbeatAgeMs: 4,
+      symbolsSynced: true,
+      asyncTrades: true,
+      tradeInFlight: 2,
+      oldestTradeInFlightAgeMs: 180,
+      dealerRttMsEwma: 95,
+      tradeRequestsSent: 1234,
+      lateTradeVerdicts: 1,
+      tradeQueueDepth: 3,
+      nonTradeQueueDepth: 0,
+      tradeDeferred: 1,
+    });
+    expect(bridge).toMatchObject({
+      asyncTrades: true,
+      tradeInFlight: 2,
+      oldestTradeInFlightAgeMs: 180,
+      dealerRttMsEwma: 95,
+      tradeRequestsSent: 1234,
+      lateTradeVerdicts: 1,
+      tradeQueueDepth: 3,
+      nonTradeQueueDepth: 0,
+      tradeDeferred: 1,
+    });
   });
 });

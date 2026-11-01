@@ -7,6 +7,7 @@ import {
   AccountsExceedTargetError,
   AlreadyLapsedError,
   AuthError,
+  ClientOrderIdReusedError,
   ConnectFailedError,
   DuplicateAccountError,
   errorFromResponse,
@@ -22,8 +23,11 @@ import {
   SeatLapsedError,
   ServerLimitError,
   SlotsFullError,
+  TerminalErrorCode,
   TerminalNotReadyError,
   TerminalTimeoutError,
+  TradeAbandonedError,
+  TradeOutcomeUnknownError,
   ValidationError,
   type ErrorResponse,
 } from '../src/index.js';
@@ -201,5 +205,88 @@ describe('errorFromResponse', () => {
     expect(error).toBeInstanceOf(FxSocketError);
     expect(error).toBeInstanceOf(Error);
     expect(error.name).toBe('SeatLapsedError');
+  });
+
+  it('tells the three terminal 504s apart', () => {
+    const unknown = errorFromResponse(
+      response(504, {
+        error: 'MRPC_TRADE_OUTCOME_UNKNOWN',
+        message: 'may have executed',
+        command_id: 3,
+      }),
+    );
+    expect(unknown).toBeInstanceOf(TradeOutcomeUnknownError);
+    // Existing `catch (e instanceof TerminalTimeoutError)` code keeps working.
+    expect(unknown).toBeInstanceOf(TerminalTimeoutError);
+    expect(unknown.code).toBe(TerminalErrorCode.MRPC_TRADE_OUTCOME_UNKNOWN);
+    expect(unknown.message).toBe('may have executed');
+
+    const abandoned = errorFromResponse(
+      response(504, { error: 'MRPC_ABANDONED', message: 'not executed' }),
+    );
+    expect(abandoned).toBeInstanceOf(TradeAbandonedError);
+    expect(abandoned).toBeInstanceOf(TerminalTimeoutError);
+    expect(abandoned).not.toBeInstanceOf(TradeOutcomeUnknownError);
+
+    const read = errorFromResponse(
+      response(504, { error: 'MRPC_TIMEOUT', message: 'read timed out' }),
+    );
+    expect(read.constructor).toBe(TerminalTimeoutError);
+
+    // A gateway 504 without a terminal envelope stays a plain timeout too.
+    expect(errorFromResponse(response(504, null)).constructor).toBe(
+      TerminalTimeoutError,
+    );
+  });
+
+  it('maps a reused clientOrderId to its own error, not a duplicate account', () => {
+    const error = errorFromResponse(
+      response(409, {
+        error: 'MRPC_CLIENT_ORDER_ID_REUSED',
+        message: 'this clientOrderId was already used for a different order',
+        command_id: 0,
+      }),
+    );
+    expect(error).toBeInstanceOf(ClientOrderIdReusedError);
+    expect(error).not.toBeInstanceOf(DuplicateAccountError);
+    expect(error.status).toBe(409);
+    // Other 409s keep their old mapping.
+    expect(errorFromResponse(response(409, { detail: 'dup' }))).toBeInstanceOf(
+      DuplicateAccountError,
+    );
+  });
+
+  it('maps a stopped trade EA to TerminalNotReadyError whatever the status', () => {
+    const error = errorFromResponse(
+      response(500, {
+        error: 'MRPC_TRADE_EA_STOPPED',
+        message: 'trade EA stopped before the request was sent',
+      }),
+    );
+    expect(error).toBeInstanceOf(TerminalNotReadyError);
+    expect(error.code).toBe('MRPC_TRADE_EA_STOPPED');
+    expect(
+      errorFromResponse(response(503, { error: 'MRPC_TRADE_EA_NOT_READY' })),
+    ).toBeInstanceOf(TerminalNotReadyError);
+  });
+
+  it('maps the terminal 400 codes to ValidationError with the code kept', () => {
+    for (const code of [
+      TerminalErrorCode.MRPC_UNKNOWN_SYMBOL,
+      TerminalErrorCode.MRPC_UNKNOWN_TICKET,
+      TerminalErrorCode.MRPC_BAD_TIMEFRAME,
+      TerminalErrorCode.MRPC_UNSUPPORTED,
+    ]) {
+      const error = errorFromResponse(response(400, { error: code, message: 'no' }));
+      expect(error).toBeInstanceOf(ValidationError);
+      expect(error.code).toBe(code);
+    }
+  });
+
+  it('lists every terminal error code under its own name', () => {
+    for (const [key, value] of Object.entries(TerminalErrorCode)) {
+      expect(value).toBe(key);
+    }
+    expect(Object.keys(TerminalErrorCode)).toHaveLength(21);
   });
 });

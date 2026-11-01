@@ -25,8 +25,10 @@ import type {
   CloseLegStatus,
   CloseSide,
   DealEntry,
+  ExpirationMode,
   HealthStatus,
   KeyScope,
+  OrderEventKind,
   OrderKind,
   OrderLegStatus,
   OrderOperation,
@@ -674,6 +676,47 @@ export interface ServerTimezone {
   readonly utcOffsetSeconds: number;
 }
 
+/**
+ * An active pending order (`GET /PendingOrders`), with what a copy of it
+ * needs. Also the rows of the `orders` stream's snapshot.
+ *
+ * `expiration` and `time` are broker server time; `expirationUtc` and `timeUtc`
+ * are the same moments in real UTC. `expiration` / `expirationUtc` are `''`
+ * when the order does not expire; `timeUtc` is `null` until the bridge has read
+ * the server clock (its first second). On MT4 `stopLimitPrice` is always 0,
+ * `volumeInitial` equals `volume`, and `expirationMode` is `gtc` or
+ * `specified`. Bridges MT5 0.17.0+ / MT4 0.15.0+.
+ */
+export interface PendingOrder {
+  readonly ticket: number;
+  readonly symbol: string;
+  /** `BuyLimit`, `SellLimit`, `BuyStop`, `SellStop`, `BuyStopLimit` or `SellStopLimit`. */
+  readonly type: OrderOperation;
+  /** Lots when placed. */
+  readonly volumeInitial: number;
+  /** Lots still to fill. */
+  readonly volume: number;
+  /** The price it triggers at. */
+  readonly price: number;
+  /** The limit price a stop-limit order turns into; 0 otherwise. */
+  readonly stopLimitPrice: number;
+  /** Stop loss (0 = none). */
+  readonly sl: number;
+  /** Take profit (0 = none). */
+  readonly tp: number;
+  readonly expirationMode: ExpirationMode | '';
+  /** Broker server time, as sent; `''` when the order does not expire. */
+  readonly expiration: string;
+  /** Real UTC; `''` when the order does not expire. */
+  readonly expirationUtc: string;
+  readonly magic: number;
+  readonly comment: string;
+  /** When it was placed. Broker server time, as sent. */
+  readonly time: string;
+  /** `time` in real UTC, or `null` when the bridge has not read the clock yet. */
+  readonly timeUtc: string | null;
+}
+
 // --------------------------------------------------------------------------- //
 // Terminal — market data
 // --------------------------------------------------------------------------- //
@@ -774,8 +817,48 @@ export interface SymbolInfo {
   readonly currencyBase: string;
   readonly currencyProfit: string;
   readonly currencyMargin: string;
+  /**
+   * Order kinds the broker takes on this symbol: `market`, `limit`, `stop`,
+   * `stopLimit`, `sl`, `tp`, `closeBy`. Empty on bridges before MT5 0.17.0 /
+   * MT4 0.15.0.
+   */
+  readonly orderModes: readonly string[];
+  /** Pending-order expiry kinds the broker accepts (see {@link ExpirationMode}). */
+  readonly expirationModes: readonly string[];
+  /** Fill policies: `fok`, `ioc`, `boc`. Always empty on MT4. */
+  readonly fillingModes: readonly string[];
   readonly commissions: readonly CommissionRule[];
   readonly sessions: readonly TradingSession[];
+}
+
+/** One symbol of a bulk lookup that did not resolve. */
+export interface SymbolInfoError {
+  readonly symbol: string;
+  /** The error code a single `symbolInfo()` would have answered with. */
+  readonly error: string;
+  readonly message: string;
+}
+
+/**
+ * Reply of a bulk `GET /SymbolInfo?symbols=…`: the symbols that resolved, in
+ * request order, and the ones that did not.
+ */
+export interface SymbolInfoBatch {
+  readonly symbols: readonly SymbolInfo[];
+  readonly errors: readonly SymbolInfoError[];
+}
+
+/** One row of a `POST /SymbolSelect` reply. */
+export interface SymbolSelectResult {
+  readonly symbol: string;
+  /** The symbol is in Market Watch (`false`: unknown to this broker). */
+  readonly selected: boolean;
+  /**
+   * It had a live bid/ask when the reply was sent. A freshly selected symbol
+   * may need a moment longer, or never quote at all for a name the broker
+   * lists but does not feed.
+   */
+  readonly quoting: boolean;
 }
 
 /** One OHLC bar (`GET /PriceHistory`). `realVolume` is 0 on MT4. */
@@ -810,6 +893,11 @@ export interface Candle {
  *
  * `deal` is the executed deal ticket (0 for pending placement, and always 0 on
  * MT4); `order` is the resulting position / pending-order ticket.
+ *
+ * Bridges MT5 0.17.0+ / MT4 0.15.0+ add `position` (the position the trade
+ * opened or acted on; the order ticket on MT4), `time` / `timeUtc` (the fill),
+ * `remainderTicket` (MT4: the ticket the rest of a partial close moved to) and
+ * echo `clientOrderId`. On older bridges they keep their defaults.
  */
 export interface OrderResult {
   readonly success: boolean;
@@ -823,6 +911,24 @@ export interface OrderResult {
   readonly bid: number;
   readonly ask: number;
   readonly comment: string;
+  /** Position the trade opened, changed or closed (0 when not known). */
+  readonly position: number;
+  /** When it filled, broker server time; `''` when nothing filled. */
+  readonly time: string;
+  /** `time` in real UTC, or `null` when nothing filled or it is not known. */
+  readonly timeUtc: string | null;
+  /** MT4: the ticket the rest of a partial close moved to. 0 otherwise. */
+  readonly remainderTicket: number;
+  /** The request's `clientOrderId`, echoed; `null` when it carried none. */
+  readonly clientOrderId: string | null;
+  /**
+   * *From the `Idempotent-Replayed` header.* True when this is the remembered
+   * answer to an earlier request with the same `clientOrderId`: nothing was
+   * traded by this call.
+   */
+  readonly idempotentReplayed: boolean;
+  /** *From the `Server-Timing` header*, or `null` when the bridge sent none. */
+  readonly serverTiming: ServerTiming | null;
   /**
    * *Derived.* True for a benign no-op (retcode 10025 / `outcome ===
    * 'no_change'`): the requested SL/TP/price already match the current values.
@@ -834,6 +940,16 @@ export interface OrderResult {
    * re-sending an identical modify returns 10025 with `success === false`.
    */
   readonly isEffective: boolean;
+}
+
+/**
+ * Where a trade's time went (`Server-Timing` header): `queueMs` waiting for the
+ * trade EA, `execMs` in the EA and at the dealer. Either is `null` when the
+ * header did not report it.
+ */
+export interface ServerTiming {
+  readonly queueMs: number | null;
+  readonly execMs: number | null;
 }
 
 /**
@@ -921,12 +1037,37 @@ export interface AccountHealth {
  * progress (`-1` = never registered, or a pod older than bridge 0.10). A large
  * age while `tradeEaReady` is still `true` means the EA is blocked in a long
  * dealer call or dead — worth alerting on.
+ *
+ * The trade-pipeline fields (bridges MT5 0.16.0+ / MT4 0.14.0+) keep their
+ * defaults on older pods. To spot a stalled dealer, alert on
+ * `oldestTradeInFlightAgeMs` rather than the heartbeat: on MT5 the EA no longer
+ * blocks inside a dealer call, so a fresh heartbeat does not prove the dealer
+ * is answering. A non-zero `lateTradeVerdicts` means some trade executed after
+ * the bridge had given up on it.
  */
 export interface BridgeHealth {
   readonly version: string;
   readonly tradeEaReady: boolean;
   readonly tradeEaHeartbeatAgeMs: number;
   readonly symbolsSynced: boolean;
+  /** Several trade requests may be at the dealer at once (always `false` on MT4). */
+  readonly asyncTrades: boolean;
+  /** Trade requests awaiting a dealer verdict. */
+  readonly tradeInFlight: number;
+  /** Age of the oldest request awaiting a verdict, ms (`-1` = none). */
+  readonly oldestTradeInFlightAgeMs: number;
+  /** Dealer round-trip moving average, ms (`-1` = no sample yet). */
+  readonly dealerRttMsEwma: number;
+  /** Trade commands handed to the terminal since boot. */
+  readonly tradeRequestsSent: number;
+  /** Dealer verdicts that arrived after the bridge had given up. */
+  readonly lateTradeVerdicts: number;
+  /** Trade commands waiting for the trade EA. */
+  readonly tradeQueueDepth: number;
+  /** Read commands waiting for the terminal. */
+  readonly nonTradeQueueDepth: number;
+  /** Trade commands held back behind another request on the same ticket. */
+  readonly tradeDeferred: number;
 }
 
 /** Full health snapshot (`GET /status`) — always HTTP 200. */
@@ -976,6 +1117,15 @@ export interface HealthChecks {
  * the identifiers, `symbol`, `type`, `volume` and `price` are trustworthy, but
  * `entry` is `'Unknown'` and `profit` / `commission` / `swap` / `magic` /
  * `comment` are zeroed — reconcile the deal via `GET /OrderHistory`.
+ *
+ * Bridges MT5 0.17.0+ / MT4 0.15.0+ add `sl` / `tp` (an opening deal carries
+ * the stops it opened with, a closing deal the ones the position had),
+ * `positionVolume` (volume still open after this deal: 0 once closed, `-1`
+ * when unknown, as on a degraded frame or an older bridge) and `timeUtc`. On
+ * MT4 a partial close moves the rest of the order to a new ticket and links the
+ * halves: `remainderTicket` on the `Out` names the new ticket, `remainderOf` on
+ * the new ticket's `In` names the old one. Both are always 0 on MT5, where a
+ * position keeps its id.
  */
 export interface TradeEvent {
   readonly deal: number;
@@ -993,9 +1143,56 @@ export interface TradeEvent {
   readonly comment: string;
   /** Broker server time, as sent. Not a UTC timestamp. */
   readonly time: string;
+  /** `time` in real UTC, or `null` when the bridge has not read the clock yet. */
+  readonly timeUtc: string | null;
   readonly degraded: boolean;
+  /** Stop loss as of this deal (0 = none). */
+  readonly sl: number;
+  /** Take profit as of this deal (0 = none). */
+  readonly tp: number;
+  /** Volume still open on the position after this deal; `-1` when unknown. */
+  readonly positionVolume: number;
+  /** MT4, on the `Out` of a partial close: the ticket the rest moved to. */
+  readonly remainderTicket: number;
+  /** MT4, on the `In` of a partial close's remainder: the ticket it came from. */
+  readonly remainderOf: number;
   /** *Derived.* Deal P&L including costs: `profit + commission + swap`. */
   readonly netProfit: number;
+}
+
+/**
+ * The stops of an open position moved without a deal (a `modify` frame on the
+ * `trades` stream). `price` is the open price; `sl` / `tp` the new stops (0 =
+ * none); `time` is when the bridge saw the change, in broker server time.
+ * Volume changes come as `trade` events instead (see `positionVolume`).
+ */
+export interface PositionModifyData {
+  readonly position: number;
+  readonly symbol: string;
+  /** `Buy` or `Sell`. */
+  readonly type: OrderOperation;
+  readonly volume: number;
+  readonly price: number;
+  readonly sl: number;
+  readonly tp: number;
+  readonly magic: number;
+  readonly comment: string;
+  /** Broker server time, as sent. Not a UTC timestamp. */
+  readonly time: string;
+  /** `time` in real UTC, or `null` when the bridge has not read the clock yet. */
+  readonly timeUtc: string | null;
+}
+
+/**
+ * One step in a pending order's life (an `order` frame on the `orders`
+ * stream): the order as of that step, plus what happened. For `deleted`,
+ * `expired` and `triggered` it is the order as it was last. `position` is set
+ * on `triggered` (the position the fill opened or added to; on MT4 the order's
+ * own ticket) and 0 otherwise.
+ */
+export interface OrderEventData extends PendingOrder {
+  readonly event: OrderEventKind;
+  readonly position: number;
 }
 
 /** Terminal status pushed (~1/s) on the `terminal` stream. */

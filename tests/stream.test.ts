@@ -7,13 +7,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   DealEntry,
+  FxSocket,
+  OrderEventKind,
   parseEvent,
   Stream,
   StreamError,
+  StreamTopic,
   ValidationError,
   withApiKey,
   type StreamEvent,
   type TickEvent,
+  type TradeEventMessage,
 } from '../src/index.js';
 import { TICK_FRAME } from './helpers/fixtures.js';
 
@@ -215,9 +219,13 @@ describe('parseEvent', () => {
     expect(terminal.type).toBe('terminal');
     if (terminal.type === 'terminal') expect(terminal.data.tradeAllowed).toBe(true);
 
+    // A pre-0.17 warning names no topic; the fields default to empty.
     expect(parseEvent({ type: 'warning', dropped: 7 })).toEqual({
       type: 'warning',
       dropped: 7,
+      topic: '',
+      symbol: '',
+      timeframe: '',
     });
     expect(parseEvent({ type: 'subscribed', topic: 'prices', message: '' })).toEqual({
       type: 'subscribed',
@@ -596,7 +604,13 @@ describe('streaming', () => {
       new Set(['warning', 'account', 'terminal', 'subscriptions']),
     );
     const warning = seen.find((e) => e.type === 'warning');
-    expect(warning).toEqual({ type: 'warning', dropped: 42 });
+    expect(warning).toEqual({
+      type: 'warning',
+      dropped: 42,
+      topic: '',
+      symbol: '',
+      timeframe: '',
+    });
   });
 
   it('emits typed events to listeners as well', async () => {
@@ -845,5 +859,509 @@ describe('streaming', () => {
   it('reports a connection that never opens', async () => {
     const s = stream('ws://127.0.0.1:1/ws', { openTimeoutMs: 1_000 });
     await expect(s.connect()).rejects.toThrow(StreamError);
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// Bridge MT5 0.17.0 / MT4 0.15.0
+// --------------------------------------------------------------------------- //
+
+function tradeFrame(
+  data: Record<string, unknown>,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    type: 'trade',
+    data: {
+      deal: 0,
+      order: 0,
+      position: 0,
+      symbol: 'EURUSD',
+      type: 'Buy',
+      entry: 'In',
+      volume: 0.1,
+      price: 1.0,
+      profit: 0,
+      commission: 0,
+      swap: 0,
+      magic: 0,
+      comment: '',
+      time: '2026-10-29T18:00:00.000Z',
+      degraded: false,
+      ...data,
+    },
+    ...extra,
+  };
+}
+
+const PENDING = {
+  ticket: 501,
+  symbol: 'EURUSD',
+  type: 'BuyLimit',
+  volumeInitial: 0.1,
+  volume: 0.1,
+  price: 1.07,
+  stopLimitPrice: 0,
+  sl: 0,
+  tp: 0,
+  expirationMode: 'gtc',
+  expiration: '',
+  expirationUtc: '',
+  magic: 7,
+  comment: '',
+  time: '2026-10-29T18:00:00.000Z',
+  timeUtc: '2026-10-29T16:00:00.000Z',
+};
+
+describe('parseEvent (0.17 frames)', () => {
+  it('reads the envelope off data frames', () => {
+    const tick = parseEvent({ ...TICK_FRAME, seq: 41, ts: 1761760800123 });
+    expect(tick).toMatchObject({
+      type: 'tick',
+      seq: 41,
+      ts: 1761760800123,
+      snapshot: false,
+    });
+
+    const snapshot = parseEvent({
+      type: 'account',
+      snapshot: true,
+      ts: 1761760800000,
+      data: { balance: 1 },
+    });
+    expect(snapshot).toMatchObject({ seq: null, ts: 1761760800000, snapshot: true });
+
+    // Pre-0.17 frames carry no envelope.
+    expect(parseEvent(TICK_FRAME)).toMatchObject({
+      seq: null,
+      ts: null,
+      snapshot: false,
+    });
+  });
+
+  it('decodes the new trade fields and the replay flag', () => {
+    const event = parseEvent(
+      tradeFrame(
+        {
+          deal: 9,
+          order: 10,
+          position: 10,
+          entry: 'Out',
+          sl: 1.05,
+          tp: 1.2,
+          positionVolume: 0.05,
+          timeUtc: '2026-10-29T16:00:00.000Z',
+          remainderTicket: 11,
+          remainderOf: 0,
+        },
+        { replay: true, ts: 5 },
+      ),
+    );
+    expect(event.type).toBe('trade');
+    if (event.type !== 'trade') return;
+    expect(event.replay).toBe(true);
+    expect(event.seq).toBeNull();
+    expect(event.data).toMatchObject({
+      sl: 1.05,
+      tp: 1.2,
+      positionVolume: 0.05,
+      timeUtc: '2026-10-29T16:00:00.000Z',
+      remainderTicket: 11,
+      remainderOf: 0,
+    });
+    expect(parseEvent(tradeFrame({ deal: 1 }))).toMatchObject({ replay: false });
+  });
+
+  it('decodes modify, order, orders and replayed frames', () => {
+    const modify = parseEvent({
+      type: 'modify',
+      seq: 3,
+      data: {
+        position: 10,
+        symbol: 'EURUSD',
+        type: 'Sell',
+        volume: 0.1,
+        price: 1.1,
+        sl: 1.12,
+        tp: 1.05,
+        magic: 7,
+        comment: 'c',
+        time: '2026-10-29T18:00:01Z',
+      },
+    });
+    expect(modify.type).toBe('modify');
+    if (modify.type === 'modify') {
+      expect(modify.data.sl).toBe(1.12);
+      expect(modify.data.timeUtc).toBeNull();
+      expect(modify.seq).toBe(3);
+    }
+
+    const order = parseEvent({
+      type: 'order',
+      seq: 1,
+      data: { ...PENDING, event: 'triggered', position: 9001 },
+    });
+    expect(order.type).toBe('order');
+    if (order.type === 'order') {
+      expect(order.data.event).toBe(OrderEventKind.TRIGGERED);
+      expect(order.data.position).toBe(9001);
+      expect(order.data.ticket).toBe(501);
+      expect(order.data.expirationMode).toBe('gtc');
+    }
+
+    const orders = parseEvent({ type: 'orders', snapshot: true, data: [PENDING] });
+    expect(orders.type).toBe('orders');
+    if (orders.type === 'orders') {
+      expect(orders.snapshot).toBe(true);
+      expect(orders.data[0]).toEqual(PENDING);
+    }
+
+    expect(
+      parseEvent({ type: 'replayed', topic: 'trades', count: 12, truncated: true }),
+    ).toEqual({ type: 'replayed', topic: 'trades', count: 12, truncated: true });
+
+    expect(
+      parseEvent({
+        type: 'warning',
+        topic: 'bars',
+        symbol: 'EURUSD',
+        timeframe: 'M5',
+        dropped: 3,
+        ts: 9,
+      }),
+    ).toEqual({
+      type: 'warning',
+      dropped: 3,
+      topic: 'bars',
+      symbol: 'EURUSD',
+      timeframe: 'M5',
+    });
+  });
+});
+
+describe('since / orders subscriptions', () => {
+  it('validates since before sending', async () => {
+    const s = stream('ws://127.0.0.1:1/ws');
+    await expect(
+      s.subscribe('prices', { symbol: 'EURUSD', since: '2026-10-29T18:00:00Z' }),
+    ).rejects.toThrow(/only applies to topic 'trades'/);
+    await expect(s.subscribeTrades({ since: '' })).rejects.toThrow(ValidationError);
+    await expect(s.subscribeTrades({ since: 5 as unknown as string })).rejects.toThrow(
+      ValidationError,
+    );
+  });
+
+  it('sends since on trades and subscribes to orders', async () => {
+    const server = await startServer(() => {});
+    const s = stream(server.url, { autoReconnect: false });
+    await s.connect();
+    await s.subscribeTrades({ since: '2026-10-29T18:00:00.123Z' });
+    await s.subscribeOrders();
+    await s.unsubscribeOrders();
+    await until(() => server.received.length === 3);
+    await s.close();
+
+    expect(server.received).toEqual([
+      { action: 'subscribe', topic: 'trades', since: '2026-10-29T18:00:00.123Z' },
+      { action: 'subscribe', topic: 'orders' },
+      { action: 'unsubscribe', topic: 'orders' },
+    ]);
+    expect(StreamTopic.ORDERS).toBe('orders');
+  });
+
+  it('emits the new event types to listeners', async () => {
+    const server = await startServer((socket) => {
+      socket.once('message', () => {
+        socket.send(
+          JSON.stringify({ type: 'orders', snapshot: true, data: [PENDING] }),
+        );
+        socket.send(
+          JSON.stringify({
+            type: 'order',
+            seq: 1,
+            data: { ...PENDING, event: 'placed' },
+          }),
+        );
+        socket.send(JSON.stringify({ type: 'modify', seq: 2, data: { position: 1 } }));
+        socket.send(
+          JSON.stringify({
+            type: 'replayed',
+            topic: 'trades',
+            count: 0,
+            truncated: false,
+          }),
+        );
+      });
+    });
+    const s = stream(server.url, { autoReconnect: false });
+    const seen: string[] = [];
+    s.on('orders', () => seen.push('orders'));
+    s.on('order', () => seen.push('order'));
+    s.on('modify', () => seen.push('modify'));
+    s.on('replayed', () => seen.push('replayed'));
+    await s.connect();
+    await s.subscribeOrders();
+    await until(() => seen.length === 4);
+    await s.close();
+    expect(seen).toEqual(['orders', 'order', 'modify', 'replayed']);
+  });
+});
+
+describe('trades resume across a reconnect', () => {
+  async function collectTrades(s: Stream, count: number): Promise<TradeEventMessage[]> {
+    const trades: TradeEventMessage[] = [];
+    for await (const event of s) {
+      if (event.type === 'trade') {
+        trades.push(event);
+        if (trades.length === count) break;
+      }
+    }
+    return trades;
+  }
+
+  it('resubscribes from the last delivered deal and drops the overlap', async () => {
+    const server = await startServer((socket, index) => {
+      socket.once('message', () => {
+        if (index === 1) {
+          socket.send(
+            JSON.stringify(tradeFrame({ deal: 1, time: '2026-10-29T18:00:01.000Z' })),
+          );
+          socket.send(
+            JSON.stringify(tradeFrame({ deal: 2, time: '2026-10-29T18:00:02.500Z' })),
+          );
+          setTimeout(() => socket.close(), 20);
+          return;
+        }
+        // The replay re-sends deal 2 (at the since moment), then a deal missed
+        // while disconnected; deal 3 then also arrives live at the switch-over.
+        socket.send(
+          JSON.stringify(
+            tradeFrame({ deal: 2, time: '2026-10-29T18:00:02.500Z' }, { replay: true }),
+          ),
+        );
+        socket.send(
+          JSON.stringify(
+            tradeFrame({ deal: 3, time: '2026-10-29T18:00:05.000Z' }, { replay: true }),
+          ),
+        );
+        socket.send(
+          JSON.stringify({
+            type: 'replayed',
+            topic: 'trades',
+            count: 2,
+            truncated: false,
+          }),
+        );
+        socket.send(
+          JSON.stringify(tradeFrame({ deal: 3, time: '2026-10-29T18:00:05.000Z' })),
+        );
+        socket.send(
+          JSON.stringify(tradeFrame({ deal: 4, time: '2026-10-29T18:00:06.000Z' })),
+        );
+      });
+    });
+
+    const s = stream(server.url, { maxReconnectAttempts: 3 });
+    await s.connect();
+    await s.subscribeTrades();
+    const trades = await collectTrades(s, 4);
+    await s.close();
+
+    expect(trades.map((t) => t.data.deal)).toEqual([1, 2, 3, 4]);
+    expect(trades[2]!.replay).toBe(true);
+    expect(server.received).toEqual([
+      { action: 'subscribe', topic: 'trades' },
+      { action: 'subscribe', topic: 'trades', since: '2026-10-29T18:00:02.500Z' },
+    ]);
+  });
+
+  it('dedupes MT4 frames by order and entry, keeping the newest time', async () => {
+    const server = await startServer((socket, index) => {
+      socket.once('message', () => {
+        if (index === 1) {
+          socket.send(
+            JSON.stringify(
+              tradeFrame({ order: 70, entry: 'Out', time: '2026-10-29T18:00:09.000Z' }),
+            ),
+          );
+          // The remainder's In carries the original (older) open time.
+          socket.send(
+            JSON.stringify(
+              tradeFrame({
+                order: 71,
+                entry: 'In',
+                remainderOf: 70,
+                time: '2026-10-29T10:00:00.000Z',
+              }),
+            ),
+          );
+          setTimeout(() => socket.close(), 20);
+          return;
+        }
+        socket.send(
+          JSON.stringify(
+            tradeFrame(
+              { order: 70, entry: 'Out', time: '2026-10-29T18:00:09.000Z' },
+              { replay: true },
+            ),
+          ),
+        );
+        socket.send(
+          JSON.stringify(
+            tradeFrame({ order: 71, entry: 'Out', time: '2026-10-29T18:00:12.000Z' }),
+          ),
+        );
+      });
+    });
+
+    const s = new Stream({
+      wsUrl: server.url,
+      apiKey: 'k',
+      platform: 'mt4',
+      maxReconnectAttempts: 3,
+    });
+    await s.connect();
+    await s.subscribeTrades();
+    const trades = await collectTrades(s, 3);
+    await s.close();
+
+    expect(trades.map((t) => `${t.data.order}:${t.data.entry}`)).toEqual([
+      '70:Out',
+      '71:In',
+      '71:Out',
+    ]);
+    expect(server.received[1]).toEqual({
+      action: 'subscribe',
+      topic: 'trades',
+      since: '2026-10-29T18:00:09.000Z',
+    });
+  });
+
+  it("falls back to the caller's since when no deal arrived yet", async () => {
+    const server = await startServer((socket, index) => {
+      socket.once('message', () => {
+        if (index === 1) {
+          setTimeout(() => socket.close(), 20);
+          return;
+        }
+        socket.send(JSON.stringify(tradeFrame({ deal: 1 })));
+      });
+    });
+
+    const s = stream(server.url, { maxReconnectAttempts: 3 });
+    await s.connect();
+    await s.subscribeTrades({ since: '2026-10-29T17:00:00.000Z' });
+    await collectTrades(s, 1);
+    await s.close();
+
+    expect(server.received).toEqual([
+      { action: 'subscribe', topic: 'trades', since: '2026-10-29T17:00:00.000Z' },
+      { action: 'subscribe', topic: 'trades', since: '2026-10-29T17:00:00.000Z' },
+    ]);
+  });
+
+  it('starts afresh after an unsubscribe', async () => {
+    const server = await startServer((socket, index) => {
+      socket.on('message', (raw) => {
+        const payload = JSON.parse(raw.toString()) as Record<string, unknown>;
+        if (index !== 1 || payload['action'] !== 'subscribe') return;
+        if (server.received.length === 1) {
+          socket.send(
+            JSON.stringify(tradeFrame({ deal: 1, time: '2026-10-29T18:00:01Z' })),
+          );
+        } else {
+          setTimeout(() => socket.close(), 20);
+        }
+      });
+    });
+
+    const s = stream(server.url, { maxReconnectAttempts: 3 });
+    await s.connect();
+    await s.subscribeTrades();
+    await collectTrades(s, 1);
+    await s.unsubscribeTrades();
+    await s.subscribeTrades();
+    await until(() => server.connections === 2 && server.received.length === 4);
+    await s.close();
+
+    expect(server.received.at(-1)).toEqual({ action: 'subscribe', topic: 'trades' });
+  });
+
+  it('delivers a deliberate replay after an unsubscribe', async () => {
+    const server = await startServer((socket) => {
+      socket.on('message', (raw) => {
+        const payload = JSON.parse(raw.toString()) as Record<string, unknown>;
+        if (payload['action'] !== 'subscribe') return;
+        const replay = payload['since'] !== undefined;
+        socket.send(
+          JSON.stringify(
+            tradeFrame(
+              { deal: 1, time: '2026-10-29T18:00:01Z' },
+              replay ? { replay } : {},
+            ),
+          ),
+        );
+      });
+    });
+
+    const s = stream(server.url, { maxReconnectAttempts: 3 });
+    await s.connect();
+    await s.subscribeTrades();
+    await collectTrades(s, 1);
+    await s.unsubscribeTrades();
+    await s.subscribeTrades({ since: '2026-10-29T18:00:00Z' });
+    const [again] = await collectTrades(s, 1);
+    await s.close();
+
+    expect(again?.data.deal).toBe(1);
+    expect(again?.replay).toBe(true);
+  });
+
+  it('with resumeTrades: false, resubscribes plainly and keeps duplicates', async () => {
+    const server = await startServer((socket, index) => {
+      socket.once('message', () => {
+        socket.send(
+          JSON.stringify(tradeFrame({ deal: 1, time: '2026-10-29T18:00:01Z' })),
+        );
+        if (index === 1) setTimeout(() => socket.close(), 20);
+      });
+    });
+
+    const s = stream(server.url, { maxReconnectAttempts: 3, resumeTrades: false });
+    await s.connect();
+    await s.subscribeTrades({ since: '2026-10-29T17:00:00Z' });
+    const trades = await collectTrades(s, 2);
+    await s.close();
+
+    expect(trades.map((t) => t.data.deal)).toEqual([1, 1]);
+    expect(server.received).toEqual([
+      { action: 'subscribe', topic: 'trades', since: '2026-10-29T17:00:00Z' },
+      { action: 'subscribe', topic: 'trades' },
+    ]);
+  });
+
+  it('passes resumeTrades through the client factory', () => {
+    const fx = new FxSocket({ apiKey: 'k' });
+    const s = fx.stream(
+      {
+        id: 'a',
+        nickname: '',
+        platform: 'mt5',
+        server: 'Demo',
+        login: 1,
+        status: 'connected',
+        error: '',
+        restUrl: 'https://term.test',
+        wsUrl: 'wss://term.test/ws',
+        proxyAddress: '',
+        proxyType: '',
+        proxyLocalPort: null,
+        tradeEaSymbol: '',
+        createdAt: new Date(),
+        hasTerminal: true,
+      },
+      { resumeTrades: false },
+    );
+    expect((s as unknown as { resumeTrades: boolean }).resumeTrades).toBe(false);
   });
 });

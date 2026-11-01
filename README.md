@@ -17,14 +17,16 @@ stream live updates over REST and WebSocket.
 - **Read-only keys** — mint, scope, rotate and revoke `fxs_ro_…` keys for
   dashboards and monitors.
 - **Trading** — market & pending orders, modify, close, close-all, plus
-  margin/profit calculators.
+  margin/profit calculators. Safe retries with a `clientOrderId`, pending-order
+  expiry in UTC.
 - **Multi-account trading** — one order, or one close, fanned out to several
   accounts in a single request, with idempotency keys for safe retries.
 - **Wallet** — read your prepaid balance, pending top-ups and upcoming charges.
 - **Market data** — quotes, symbol specifications (incl. commission rules &
   trading sessions), OHLC history, account state & info.
-- **Live streaming** — ticks, bars, account, positions, trades, and terminal
-  status over WebSocket, with automatic reconnect + subscription replay.
+- **Live streaming** — ticks, bars, account, positions, trades, pending
+  orders, and terminal status over WebSocket, with automatic reconnect,
+  subscription replay, and trades that resume without losing a deal.
 - **Fully typed** — hand-written types throughout, a discriminated union for
   stream events, and no `any` in the public surface.
 - **ESM and CommonJS** — one package, both module systems, types for each.
@@ -227,7 +229,93 @@ MT4 and MT5 share one interface, timeframes included. Both accept the same nine:
 `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`, `W1`, `MN1` (or `1min`, `5min`,
 `15min`, `30min`, `1h`, `4h`, `1d`, `1w`, `1month`). MT5's other periods, such
 as `H2` or `H12`, aren't served by the terminal API, so anything else throws
-`ValidationError` before any request.
+`ValidationError` before any request. The one platform gap is stop-limit
+orders: MT4 has none, so on an MT4 account `BuyStopLimit` / `SellStopLimit` (or
+a `stopLimitPrice` on `orderModify`) throws `UnsupportedOnPlatformError` before
+anything is sent.
+
+The features below need a terminal on bridge MT5 0.17.0 / MT4 0.15.0 or newer
+(`(await terminal.status()).bridge.version`). On older bridges the new fields
+keep their defaults.
+
+### Safe retries with `clientOrderId`
+
+Give an order your own id and a retry can't trade twice. The terminal remembers
+each id for 10 minutes: a repeat, overlapping or later, trades nothing and
+answers with the first request's result, marked `idempotentReplayed`. Reusing an
+id for a _different_ order throws `ClientOrderIdReusedError`.
+
+A trade timeout (HTTP 504) comes in two kinds. `TradeOutcomeUnknownError` means
+the terminal took the order and it may have executed: re-send it with the same
+`clientOrderId` (or reconcile with `openedOrders()`), never with a new one.
+`TradeAbandonedError` means it never reached the terminal, so sending it again is
+safe. Both are `TerminalTimeoutError`s.
+
+```ts
+import { TradeAbandonedError, TradeOutcomeUnknownError } from '@fxsocket/sdk';
+
+const order = {
+  symbol: 'EURUSD',
+  operation: 'Buy',
+  volume: 0.1,
+  clientOrderId: 'copy-7f3a-0001',
+};
+let result;
+try {
+  result = await terminal.orderSend(order);
+} catch (error) {
+  if (
+    error instanceof TradeOutcomeUnknownError ||
+    error instanceof TradeAbandonedError
+  ) {
+    result = await terminal.orderSend(order); // same id: trades at most once
+  } else {
+    throw error;
+  }
+}
+console.log(result.order, result.idempotentReplayed, result.serverTiming);
+```
+
+Trade results also carry `position` (the position the trade opened or acted on),
+`time` / `timeUtc` (the fill), `remainderTicket` (MT4: the ticket the rest of a
+partial close moved to) and `serverTiming` (`queueMs` waiting for the trade EA,
+`execMs` in the EA and at the dealer).
+
+### Pending orders
+
+`pendingOrders()` lists the active pending orders with what a copy of one needs:
+`stopLimitPrice`, `volumeInitial`, `expirationMode` (`gtc` / `day` / `specified`
+/ `specifiedDay`), `expiration` (broker server time) and `expirationUtc`. To set
+an expiry in real UTC, pass `expirationUtc` instead of `expiration` (not both):
+
+```ts
+await terminal.orderSend({
+  symbol: 'EURUSD',
+  operation: 'BuyLimit',
+  volume: 0.1,
+  price: 1.08,
+  expirationUtc: new Date(Date.now() + 2 * 60 * 60 * 1000), // sent as …Z
+});
+const pending = await terminal.pendingOrders();
+```
+
+Brokers set a minimum distance for an expiry, often a few minutes ahead.
+`symbolInfo()` reports what a symbol accepts in `orderModes`, `expirationModes`
+and `fillingModes`.
+
+### Warming up symbols
+
+A symbol outside Market Watch has no quote yet, so the first order on it waits
+for its first tick. Select the symbols you will trade up front (up to 100 per
+call), or fetch their specifications in bulk, which selects them too:
+
+```ts
+const rows = await terminal.symbolSelect(['EURUSD', 'XAUUSD']);
+// [{ symbol: 'EURUSD', selected: true, quoting: true }, …]
+
+const { symbols, errors } = await terminal.symbolInfos(['EURUSD', 'NOPE']);
+// errors: [{ symbol: 'NOPE', error: 'MRPC_UNKNOWN_SYMBOL', message: … }]
+```
 
 > **Always bound `priceHistory`.** Without `from`/`to` the terminal asks the
 > broker for its _entire_ history for that timeframe — a million M1 bars on a
@@ -327,9 +415,10 @@ Both calls need the full `fxs_live_…` key — a read-only key raises
 
 ## Streaming (WebSocket)
 
-Subscribe to live ticks, bars, account, positions, trades, and terminal status. A
-dropped connection auto-reconnects and replays active subscriptions
-(`autoReconnect: true` by default).
+Subscribe to live ticks, bars, account, positions, trades, pending orders, and
+terminal status. A dropped connection auto-reconnects and replays active
+subscriptions (`autoReconnect: true` by default). The server pings every 5 s and
+`ws` answers by itself, so an idle stream needs nothing from you.
 
 A `Stream` is an async iterable, so `for await` reads it:
 
@@ -411,6 +500,14 @@ memory stays bounded even if a tick feed outruns the loop reading it. Pass
 `warning` frame, which reports what the _server_ dropped because this client
 lagged.
 
+### Frame envelope
+
+Data events (bridges MT5 0.17.0+ / MT4 0.15.0+) carry `seq`, numbered per topic,
+where a gap means the server dropped frames for you; `ts`, when the bridge sent
+it (Unix ms, UTC); and `snapshot`, set on the one current-state frame that
+follows a subscribe. Snapshots and replayed frames have `seq: null`. A `warning`
+event names the `topic` (and `symbol` / `timeframe`) that lost frames.
+
 ### Trade events
 
 A `trade` event carries the full deal: `commission`, `swap`, `magic` and a real
@@ -434,6 +531,51 @@ stream.on('trade', ({ data }) => {
   if (data.degraded)
     reconcileLater(data.position); // costs/entry unreliable
   else if (data.entry === 'Out') console.log(data.position, 'net', data.netProfit);
+});
+```
+
+On bridges MT5 0.17.0 / MT4 0.15.0 and newer a trade event also carries `sl` /
+`tp` (an opening deal the stops it opened with), `positionVolume` (volume still
+open after the deal, `-1` when unknown) and `timeUtc`. On MT4 a partial close
+moves the rest of the order to a new ticket: `remainderTicket` on the `Out` and
+`remainderOf` on the new ticket's `In` link the two. When an open position's
+stops move without a deal, the same topic sends a `modify` event.
+
+### Resuming trades after a reconnect
+
+With `resumeTrades` (on by default) a reconnect doesn't lose deals. The stream
+remembers the newest trade `time` it delivered and resubscribes with `since`, so
+the bridge replays what happened while the connection was down; duplicates of
+the overlap are dropped (by `deal` on MT5, `order` + `entry` on MT4). Replayed
+deals arrive with `replay: true`, followed by a `replayed` event.
+
+You can ask for a replay yourself too. `since` is **broker server time** as the
+frames print it (a trade event's `time` is the natural value), at most 24 h back:
+
+```ts
+await stream.subscribeTrades({ since: lastSeenTime });
+stream.on('replayed', ({ count, truncated }) => {
+  if (truncated) reconcileFromHistory(); // more than the newest 1000 deals
+});
+```
+
+The replay covers 24 h and the newest 1000 deals. After a longer gap (an
+`error` event on `trades`) or a `truncated` replay, reconcile via
+`orderHistory()`. Pass `resumeTrades: false` to `fx.stream()` for the plain
+behavior: no dedupe, and `trades` resubscribed without `since`.
+
+### Pending orders stream
+
+`subscribeOrders()` sends an `orders` event with the active pending orders,
+then an `order` event for each step: `placed`, `modified`, `deleted`, `expired`
+or `triggered` (`data.event`). A `triggered` event's `data.position` is the
+position the fill opened or added to.
+
+```ts
+await stream.subscribeOrders();
+stream.on('order', ({ data }) => {
+  if (data.event === 'triggered')
+    console.log(data.ticket, 'filled into', data.position);
 });
 ```
 
@@ -461,11 +603,17 @@ Every failure rejects with a subclass of `FxSocketError`:
 | `AlreadyLapsedError`               | the paid period ran out — a cancel can no longer be resumed         |
 | `NotBalanceFundedError`            | card-/crypto-funded server (a `ForbiddenError`) — use the dashboard |
 | `ConnectFailedError`               | broker rejected the login                                           |
-| `TerminalNotReadyError`            | terminal not provisioned / not ready                                |
-| `TerminalTimeoutError`             | the terminal didn't answer in time                                  |
-| `UnsupportedOnPlatformError`       | feature not available on this platform                              |
+| `TerminalNotReadyError`            | terminal not provisioned / not ready, or no trade EA to take orders |
+| `TerminalTimeoutError`             | the terminal didn't answer in time (base of the two below)          |
+| `TradeOutcomeUnknownError`         | a trade timed out after the terminal took it: it may have executed  |
+| `TradeAbandonedError`              | a trade never reached the terminal: safe to send again              |
+| `ClientOrderIdReusedError`         | `clientOrderId` already used for a different order                  |
+| `UnsupportedOnPlatformError`       | feature not available on this platform (MT4 stop-limit orders)      |
 | `StreamError`                      | WebSocket dropped, or could not be opened                           |
 | `ConnectionError` / `TimeoutError` | the request never completed                                         |
+
+Terminal errors carry a fixed `code` (`TerminalErrorCode`: `MRPC_UNKNOWN_SYMBOL`,
+`MRPC_TICKET_BUSY`, …). Branch on it, never on the message.
 
 ```ts
 import { AccountCapError, InsufficientBalanceError } from '@fxsocket/sdk';
@@ -637,9 +785,13 @@ Terminal timestamps (`quote.time`, candle `time`, order times) are **strings in
 broker server time** — the trailing `Z` is stylistic and does **not** mean UTC, so
 the SDK leaves them as sent rather than silently mis-dating them. Use
 `terminal.serverTimezone()` to get the broker's UTC offset if you need to convert.
+Fields named `…Utc` (`timeUtc`, `expirationUtc`) and the stream's `ts` are real
+UTC. History endpoints stay in server time on purpose: today's offset would be an
+hour off across a daylight-saving switch.
 
 The same applies to timestamps you _send_ — an order `expiration`, or the `from`
-/ `to` bounds on the history endpoints. A string is passed through verbatim and
+/ `to` bounds on the history endpoints (for an expiry in real UTC, use
+`expirationUtc`, see [Pending orders](#pending-orders)). A string is passed through verbatim and
 is the unambiguous way to express them. A `Date` is rendered as its UTC wall
 clock with no zone suffix (`2030-01-01T21:30:00`), which keeps the value the same
 whatever `TZ` the process runs under. The terminal then reads those digits as
@@ -674,7 +826,8 @@ const fx = new FxSocket({
 
 **No automatic retries.** Nothing in this SDK retries a request. Order send /
 modify / close must never replay, and a silent retry elsewhere would make that
-guarantee accidental. Retry deliberately, with an `idempotencyKey` for batches.
+guarantee accidental. Retry deliberately, with a `clientOrderId` for a single
+order and an `idempotencyKey` for batches.
 
 ## Coming from the Python SDK
 

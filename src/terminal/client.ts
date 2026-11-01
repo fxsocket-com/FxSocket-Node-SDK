@@ -4,14 +4,17 @@
  * One {@link TerminalClient} is bound to a single account's terminal endpoint
  * (`Account.restUrl`).
  *
- * MT4 and MT5 share one interface with nothing gated by platform: both terminal
- * APIs accept the same nine timeframes (see {@link Timeframe}) and all eight
- * order operations, stop-limit included. A timeframe outside that set raises
- * {@link ValidationError} before the request goes out.
+ * MT4 and MT5 share one interface. Both terminal APIs accept the same nine
+ * timeframes (see {@link Timeframe}); a timeframe outside that set raises
+ * {@link ValidationError} before the request goes out. The one platform gap is
+ * stop-limit orders, which MT4 does not have: on an MT4 account a `*StopLimit`
+ * operation, or a `stopLimitPrice` on `orderModify`, throws
+ * {@link UnsupportedOnPlatformError} before anything is sent.
  *
  * Order inputs are validated client-side to fail fast and, above all, safely —
  * see `validate.ts`. No request is auto-retried: order send/modify/close must
- * never replay, to avoid duplicate fills.
+ * never replay, to avoid duplicate fills. Send orders with a `clientOrderId`
+ * to make a deliberate retry safe.
  */
 
 import type { Dispatcher } from 'undici';
@@ -28,11 +31,14 @@ import {
   decodeMarginCalc,
   decodeOpenedOrder,
   decodeOrderResult,
+  decodePendingOrder,
   decodePositionTrade,
   decodeProfitCalc,
   decodeQuote,
   decodeServerTimezone,
   decodeSymbolInfo,
+  decodeSymbolInfoBatch,
+  decodeSymbolSelectResult,
 } from '../decode.js';
 import type { OrderOperationInput, Platform, TimeframeInput } from '../enums.js';
 import { errorFromResponse, ValidationError } from '../errors.js';
@@ -49,11 +55,14 @@ import type {
   MarginCalc,
   OpenedOrder,
   OrderResult,
+  PendingOrder,
   PositionTrade,
   ProfitCalc,
   Quote,
   ServerTimezone,
   SymbolInfo,
+  SymbolInfoBatch,
+  SymbolSelectResult,
   TimeInput,
 } from '../types.js';
 import {
@@ -61,9 +70,13 @@ import {
   coerceTimeframe,
   compact,
   formatTime,
+  rejectUnsupportedOnPlatform,
   requirePositiveVolume,
+  resolveExpiration,
   resolveModifyStops,
+  validateClientOrderId,
   validateOrderSend,
+  validateSymbolList,
 } from '../validate.js';
 
 export interface TerminalClientOptions {
@@ -98,13 +111,31 @@ export interface OrderSendParams {
   slippage?: number;
   stopLoss?: number;
   takeProfit?: number;
-  /** Required for `*StopLimit` operations. */
+  /** Required for `*StopLimit` operations (MT5 only). */
   stopLimitPrice?: number;
-  /** Omit for good-till-cancelled. */
+  /**
+   * When a pending order expires, in broker server time. Omit for
+   * good-till-cancelled. Cannot be combined with `expirationUtc`.
+   */
   expiration?: TimeInput;
+  /**
+   * When a pending order expires, in real UTC: a `Date`, or an ISO-8601 UTC
+   * string (`2026-11-03T17:00:00Z`). The terminal converts it with the
+   * broker's current offset. Cannot be combined with `expiration`. Brokers set
+   * a minimum distance (often a few minutes ahead).
+   */
+  expirationUtc?: TimeInput;
   comment?: string;
   /** Magic number written onto the order (`expertId` on the wire). */
   magic?: number;
+  /**
+   * Your own id for this order (1-64 characters, remembered by the terminal
+   * for 10 minutes). It makes a retry safe: a repeat with the same id trades
+   * nothing and answers with the first request's result (`idempotentReplayed`
+   * on the result). Reusing an id for a different order throws
+   * {@link ClientOrderIdReusedError}.
+   */
+  clientOrderId?: string;
 }
 
 export interface OrderModifyParams {
@@ -114,8 +145,12 @@ export interface OrderModifyParams {
   takeProfit?: number;
   /** New entry price, for a pending order. */
   price?: number;
+  /** New stop-limit price, for a stop-limit pending order (MT5 only). */
   stopLimitPrice?: number;
+  /** New expiry, in broker server time. Cannot be combined with `expirationUtc`. */
   expiration?: TimeInput;
+  /** New expiry, in real UTC (see {@link OrderSendParams.expirationUtc}). */
+  expirationUtc?: TimeInput;
   /** Remove the stop-loss. Cannot be combined with `stopLoss`. */
   clearStopLoss?: boolean;
   /** Remove the take-profit. Cannot be combined with `takeProfit`. */
@@ -178,6 +213,18 @@ export class TerminalClient {
     );
   }
 
+  /**
+   * The active pending orders, with what a copy of one needs: stop-limit
+   * price, initial volume, expiry mode and expiry (server time and UTC).
+   * Bridges MT5 0.17.0+ / MT4 0.15.0+.
+   */
+  async pendingOrders(): Promise<PendingOrder[]> {
+    return decodeList(
+      await this.http.request('GET', '/PendingOrders'),
+      decodePendingOrder,
+    );
+  }
+
   /** Historical deals / closed orders, optionally bounded by a time range. */
   async orderHistory(range: TimeRange = {}): Promise<HistoryTrade[]> {
     const params = compact({ from: formatTime(range.from), to: formatTime(range.to) });
@@ -220,6 +267,37 @@ export class TerminalClient {
   async symbolInfo(symbol: string): Promise<SymbolInfo> {
     return decodeSymbolInfo(
       await this.http.request('GET', '/SymbolInfo', { params: { symbol } }),
+    );
+  }
+
+  /**
+   * Contract specifications for up to 100 symbols in one call. Symbols that
+   * do not resolve come back in `errors` instead of failing the call. The
+   * terminal also selects them all into Market Watch on the way, so this warms
+   * them up like {@link TerminalClient.symbolSelect}. Bridges MT5 0.17.0+ /
+   * MT4 0.15.0+.
+   */
+  async symbolInfos(symbols: readonly string[]): Promise<SymbolInfoBatch> {
+    const names = validateSymbolList(symbols, 'symbolInfos');
+    return decodeSymbolInfoBatch(
+      await this.http.request('GET', '/SymbolInfo', {
+        params: { symbols: names.join(',') },
+      }),
+    );
+  }
+
+  /**
+   * Put up to 100 symbols into Market Watch in one pass, and wait (up to 1 s,
+   * once) until the new ones quote. A symbol outside Market Watch has no quote,
+   * so the first order on it waits for its first tick; selecting a copier's
+   * symbols at start moves that wait out of the first trade. Needs a trading
+   * key (a read-only key gets 403). Bridges MT5 0.17.0+ / MT4 0.15.0+.
+   */
+  async symbolSelect(symbols: readonly string[]): Promise<SymbolSelectResult[]> {
+    const names = validateSymbolList(symbols, 'symbolSelect');
+    return decodeList(
+      await this.http.request('POST', '/SymbolSelect', { json: { symbols: names } }),
+      decodeSymbolSelectResult,
     );
   }
 
@@ -296,9 +374,15 @@ export class TerminalClient {
    *
    * A `200` only means the terminal answered — check the body: `success` is
    * true for retcode `10009` (done) or `10008` (placed).
+   *
+   * A 504 comes in two kinds. {@link TradeOutcomeUnknownError}: the terminal
+   * took the order and it may have executed, so reconcile or re-send with the
+   * same `clientOrderId`. {@link TradeAbandonedError}: it never reached the
+   * terminal, so re-sending is safe.
    */
   async orderSend(params: OrderSendParams): Promise<OrderResult> {
     const operation = coerceOperation(params.operation);
+    rejectUnsupportedOnPlatform(this.platform, { operation });
     validateOrderSend(operation, {
       volume: params.volume,
       price: params.price,
@@ -306,6 +390,8 @@ export class TerminalClient {
       stopLoss: params.stopLoss,
       takeProfit: params.takeProfit,
     });
+    const clientOrderId = validateClientOrderId(params.clientOrderId);
+    const { expiration, expirationUtc } = resolveExpiration(params);
     const body = compact({
       symbol: params.symbol,
       operation,
@@ -315,13 +401,13 @@ export class TerminalClient {
       stopLoss: params.stopLoss,
       takeProfit: params.takeProfit,
       stopLimitPrice: params.stopLimitPrice,
-      expiration: formatTime(params.expiration),
+      expiration,
+      expirationUtc,
       comment: params.comment,
       expertId: params.magic,
+      clientOrderId,
     });
-    return decodeOrderResult(
-      await this.http.request('POST', '/OrderSend', { json: body }),
-    );
+    return this.trade('/OrderSend', body);
   }
 
   /**
@@ -335,18 +421,21 @@ export class TerminalClient {
     ticket: number,
     params: OrderModifyParams = {},
   ): Promise<OrderResult> {
+    rejectUnsupportedOnPlatform(this.platform, {
+      stopLimitPrice: params.stopLimitPrice,
+    });
     const { stopLoss, takeProfit } = resolveModifyStops(params);
+    const { expiration, expirationUtc } = resolveExpiration(params);
     const body = compact({
       ticket,
       stopLoss,
       takeProfit,
       price: params.price,
       stopLimitPrice: params.stopLimitPrice,
-      expiration: formatTime(params.expiration),
+      expiration,
+      expirationUtc,
     });
-    return decodeOrderResult(
-      await this.http.request('POST', '/OrderModify', { json: body }),
-    );
+    return this.trade('/OrderModify', body);
   }
 
   /** Close a position, or delete a pending order, by ticket. */
@@ -362,9 +451,7 @@ export class TerminalClient {
       volume: params.volume,
       slippage: params.slippage,
     });
-    return decodeOrderResult(
-      await this.http.request('POST', '/OrderClose', { json: body }),
-    );
+    return this.trade('/OrderClose', body);
   }
 
   /**
@@ -375,10 +462,12 @@ export class TerminalClient {
    * also deletes matching pending orders. The reply carries a per-ticket result
    * for every attempted close/delete.
    *
-   * Positions opened while the pass is running are not covered, and on a 504
-   * ({@link TerminalTimeoutError}) the pass *continues to completion inside the
-   * terminal* — check {@link TerminalClient.openedOrders} before acting again
-   * rather than re-sending.
+   * Positions opened while the pass is running are not covered. On a 504
+   * ({@link TradeOutcomeUnknownError}, or {@link TerminalTimeoutError} on older
+   * bridges) the pass *continues to completion inside the terminal*, so check
+   * {@link TerminalClient.openedOrders} before acting again rather than
+   * re-sending. Only a {@link TradeAbandonedError} means the pass never
+   * started.
    */
   async closeAll(params: CloseAllParams = {}): Promise<CloseAllSummary> {
     // magic=0 is a real filter (manually-opened orders) — only undefined is
@@ -391,6 +480,15 @@ export class TerminalClient {
     return decodeCloseAllSummary(
       await this.http.request('POST', '/CloseAll', { json: body }),
     );
+  }
+
+  /** POST a trade command and decode its reply, headers included. */
+  private async trade(
+    path: string,
+    body: Record<string, unknown>,
+  ): Promise<OrderResult> {
+    const response = await this.http.send('POST', path, { json: body });
+    return decodeOrderResult(response.body, response.headers);
   }
 
   // -- health ------------------------------------------------------------- //

@@ -68,6 +68,11 @@ export interface StreamFactoryOptions {
   maxReconnectAttempts?: number;
   /** How many events to buffer for a slow consumer. 0 means unbounded. */
   maxQueueSize?: number;
+  /**
+   * Resume `trades` from the last delivered deal after a reconnect, with
+   * duplicates dropped. Default true. See `StreamOptions.resumeTrades`.
+   */
+  resumeTrades?: boolean;
 }
 
 function resolveApiKey(apiKey?: string): string {
