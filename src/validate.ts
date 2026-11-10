@@ -138,7 +138,8 @@ const NO_STOP_LIMIT: Partial<Record<Platform, { label: string; reason: string }>
   mt4: { label: 'MT4', reason: 'it has no stop-limit order type' },
   ctrader: {
     label: 'cTrader',
-    reason: 'its stop-limit fills within a range beyond the stop instead of resting as a limit',
+    reason:
+      'its stop-limit fills within a range beyond the stop instead of resting as a limit',
   },
 };
 

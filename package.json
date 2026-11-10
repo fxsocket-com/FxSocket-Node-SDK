@@ -1,6 +1,6 @@
 {
   "name": "@fxsocket/sdk",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Node.js / TypeScript SDK for the FxSocket API — MT4/MT5 account management, trading, and real-time streaming.",
   "keywords": [
     "fxsocket",

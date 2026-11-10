@@ -145,7 +145,12 @@ describe('accounts.create', () => {
     const route = mock.post('/v1/accounts', { status: 201, json: POD_ACCOUNT });
     const fx = client();
     await expect(
-      fx.accounts.create({ server: 'x', login: 1, password: 'pw', platform: 'ctrader' }),
+      fx.accounts.create({
+        server: 'x',
+        login: 1,
+        password: 'pw',
+        platform: 'ctrader',
+      }),
     ).rejects.toThrow(/dashboard/);
     expect(route.called).toBe(false);
     await fx.close();

@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-10
+
+Matches [FxSocket Python SDK](https://github.com/fxsocket-com/FxSocket-Python-SDK)
+0.10.0.
+
+cTrader support. cTrader accounts speak the same terminal API as MT5, so
+everything else works on them unchanged.
+
 ### Added
 
 - `Platform.CTRADER`: cTrader accounts (linked from the dashboard) are
@@ -228,6 +236,7 @@ WebSocket server:
   `maxQueueSize` (10,000 by default), emitting a `lag` event, so a fast tick
   feed cannot grow memory without bound.
 
+[0.10.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.10.0
 [0.9.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.9.0
 [0.8.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.8.0
 [0.7.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.7.0
