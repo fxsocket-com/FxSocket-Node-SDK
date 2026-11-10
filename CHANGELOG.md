@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Platform.CTRADER`: cTrader accounts (linked from the dashboard) are
+  listed, fetched, traded and streamed like MT4 and MT5 accounts.
+
+### Changed
+
+- `BuyStopLimit` / `SellStopLimit` and `stopLimitPrice` throw
+  `UnsupportedOnPlatformError` on cTrader too, before sending.
+- `accounts.create()` and `privateServers.addAccount()` throw
+  `ValidationError` for `platform: 'ctrader'`: cTrader accounts are linked
+  from the dashboard.
+
 ## [0.9.0] - 2026-11-01
 
 Matches [FxSocket Python SDK](https://github.com/fxsocket-com/FxSocket-Python-SDK)

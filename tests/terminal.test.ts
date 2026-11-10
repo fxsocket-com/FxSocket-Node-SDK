@@ -591,6 +591,21 @@ describe('orderSend', () => {
     expect(route.called).toBe(false);
   });
 
+  it('refuses stop-limit orders on cTrader before sending', async () => {
+    // cTrader's stop-limit is a different order; the bridge refuses it.
+    const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    await expect(
+      terminal('ctrader').orderSend({
+        symbol: 'EURUSD',
+        operation: 'SellStopLimit',
+        volume: 0.1,
+        price: 1.1,
+        stopLimitPrice: 1.09,
+      }),
+    ).rejects.toThrow(/cTrader/);
+    expect(route.called).toBe(false);
+  });
+
   it('allows stop-limit orders on MT5', async () => {
     const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
     await terminal('mt5').orderSend({

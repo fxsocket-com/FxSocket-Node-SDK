@@ -72,9 +72,18 @@ export function coerceTimeframe(value: TimeframeInput): Timeframe {
   return alias;
 }
 
-/** Validate a platform value, the way the API's enum does. */
+/**
+ * Validate the platform of a password link, the way the API's enum does.
+ * cTrader has no password link: its accounts are linked from the dashboard
+ * with a cTrader ID sign-in, and the API refuses them (HTTP 400).
+ */
 export function coercePlatform(value: unknown): Platform {
   if (value === 'mt4' || value === 'mt5') return value;
+  if (value === 'ctrader') {
+    throw new ValidationError(
+      'cTrader accounts are linked from the FxSocket dashboard (sign in with cTrader), not through the API',
+    );
+  }
   throw new ValidationError(`platform must be one of mt4, mt5, got ${inspect(value)}`);
 }
 
@@ -124,24 +133,35 @@ export function validateOrderSend(
   }
 }
 
+/** Why a platform has no MT5-style stop-limit order. */
+const NO_STOP_LIMIT: Partial<Record<Platform, { label: string; reason: string }>> = {
+  mt4: { label: 'MT4', reason: 'it has no stop-limit order type' },
+  ctrader: {
+    label: 'cTrader',
+    reason: 'its stop-limit fills within a range beyond the stop instead of resting as a limit',
+  },
+};
+
 /**
- * Refuse what MT4 cannot do, before anything is sent: it has no stop-limit
- * order type. Its terminal API rejects `*StopLimit` operations (400
- * `MRPC_UNSUPPORTED`) and would silently ignore a `stopLimitPrice` on modify.
+ * Refuse what a platform cannot do, before anything is sent: stop-limit orders
+ * on MT4 (no such order type) and cTrader (a different order). Their terminal
+ * APIs reject `*StopLimit` operations (400 `MRPC_UNSUPPORTED`), and MT4 would
+ * silently ignore a `stopLimitPrice` on modify.
  */
 export function rejectUnsupportedOnPlatform(
   platform: Platform,
   fields: { operation?: OrderOperation; stopLimitPrice?: number },
 ): void {
-  if (platform !== 'mt4') return;
+  const gate = NO_STOP_LIMIT[platform];
+  if (gate === undefined) return;
   if (fields.operation !== undefined && STOP_LIMIT_OPERATIONS.has(fields.operation)) {
     throw new UnsupportedOnPlatformError(
-      `${fields.operation} orders are not supported on MT4 (it has no stop-limit order type)`,
+      `${fields.operation} orders are not supported on ${gate.label} (${gate.reason})`,
     );
   }
   if (fields.stopLimitPrice !== undefined) {
     throw new UnsupportedOnPlatformError(
-      'stopLimitPrice is not supported on MT4 (it has no stop-limit order type)',
+      `stopLimitPrice is not supported on ${gate.label} (${gate.reason})`,
     );
   }
 }

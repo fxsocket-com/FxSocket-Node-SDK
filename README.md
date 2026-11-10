@@ -11,7 +11,8 @@ stream live updates over REST and WebSocket.
 
 ## Features
 
-- **Account management** — link, list, fetch, and disconnect MT4/MT5 accounts.
+- **Account management** — link, list, fetch, and disconnect MT4/MT5 accounts;
+  list and disconnect cTrader accounts (those are linked from the dashboard).
 - **Private servers** — buy, resize, cancel and delete dedicated hosting
   servers, and manage the accounts on them.
 - **Read-only keys** — mint, scope, rotate and revoke `fxs_ro_…` keys for
@@ -30,7 +31,7 @@ stream live updates over REST and WebSocket.
 - **Fully typed** — hand-written types throughout, a discriminated union for
   stream events, and no `any` in the public surface.
 - **ESM and CommonJS** — one package, both module systems, types for each.
-- **One interface for MT4 and MT5** — platform differences handled for you.
+- **One interface for MT4, MT5 and cTrader** — platform differences handled for you.
 
 ## Install
 
@@ -225,14 +226,20 @@ Inputs are validated client-side before they're sent. One guard worth knowing: i
 rejected — pass `clearStopLoss: true` to remove one deliberately, while omitting
 the field keeps the current value.
 
-MT4 and MT5 share one interface, timeframes included. Both accept the same nine:
+MT4, MT5 and cTrader share one interface, timeframes included. All accept the same nine:
 `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`, `W1`, `MN1` (or `1min`, `5min`,
 `15min`, `30min`, `1h`, `4h`, `1d`, `1w`, `1month`). MT5's other periods, such
 as `H2` or `H12`, aren't served by the terminal API, so anything else throws
 `ValidationError` before any request. The one platform gap is stop-limit
-orders: MT4 has none, so on an MT4 account `BuyStopLimit` / `SellStopLimit` (or
+orders: MT4 has none, and cTrader's fills within a range beyond the stop instead
+of resting as a limit, so on those accounts `BuyStopLimit` / `SellStopLimit` (or
 a `stopLimitPrice` on `orderModify`) throws `UnsupportedOnPlatformError` before
 anything is sent.
+
+cTrader accounts are linked from the FxSocket dashboard with a cTrader ID
+sign-in, so `accounts.create({ platform: 'ctrader', ... })` throws
+`ValidationError`. Once linked, a cTrader account is listed, traded and streamed
+like any other: its `restUrl` is `https://api.fxsocket.com/ctrader/<account id>`.
 
 The features below need a terminal on bridge MT5 0.17.0 / MT4 0.15.0 or newer
 (`(await terminal.status()).bridge.version`). On older bridges the new fields

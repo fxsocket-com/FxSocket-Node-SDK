@@ -78,6 +78,22 @@ describe('accounts.list', () => {
     expect(pod!.tradeEaSymbol).toBe('');
     await fx.close();
   });
+
+  it('decodes a cTrader account', async () => {
+    const ctrader = {
+      ...POD_ACCOUNT,
+      platform: 'ctrader',
+      server: 'Spotware (demo)',
+      rest_url: `https://api.fxsocket.com/ctrader/${A1}`,
+      ws_url: `wss://api.fxsocket.com/ctrader/${A1}/ws`,
+    };
+    mock.get('/v1/accounts', { status: 200, json: [ctrader] });
+    const fx = client();
+    const [account] = await fx.accounts.list();
+    expect(account!.platform).toBe('ctrader');
+    expect(account!.hasTerminal).toBe(true);
+    await fx.close();
+  });
 });
 
 describe('accounts.get', () => {
@@ -122,6 +138,16 @@ describe('accounts.create', () => {
       nickname: '',
       trade_ea_symbol: '',
     });
+    await fx.close();
+  });
+
+  it('refuses a cTrader password link before sending', async () => {
+    const route = mock.post('/v1/accounts', { status: 201, json: POD_ACCOUNT });
+    const fx = client();
+    await expect(
+      fx.accounts.create({ server: 'x', login: 1, password: 'pw', platform: 'ctrader' }),
+    ).rejects.toThrow(/dashboard/);
+    expect(route.called).toBe(false);
     await fx.close();
   });
 

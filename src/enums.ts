@@ -10,10 +10,16 @@
  * so a `switch` over one of these unions should still carry a `default` arm.
  */
 
-/** Trading platform of a linked account. */
+/**
+ * Trading platform of a linked account. cTrader accounts are linked from the
+ * dashboard (a cTrader ID sign-in, no password), not through
+ * `accounts.create`; once linked they are listed, traded and streamed like MT4
+ * and MT5 accounts.
+ */
 export const Platform = {
   MT4: 'mt4',
   MT5: 'mt5',
+  CTRADER: 'ctrader',
 } as const;
 export type Platform = (typeof Platform)[keyof typeof Platform];
 
@@ -29,9 +35,10 @@ export type TradingStatus = (typeof TradingStatus)[keyof typeof TradingStatus];
 /**
  * Order operation accepted by the terminal `/OrderSend`.
  *
- * MT5 accepts all eight. MT4 has no stop-limit order type: its terminal API
- * refuses `BuyStopLimit` / `SellStopLimit` (HTTP 400 `MRPC_UNSUPPORTED`), so on
- * an MT4 account the SDK throws {@link UnsupportedOnPlatformError} for them
+ * MT5 accepts all eight. MT4 has no stop-limit order type, and cTrader's differs
+ * from MT5's (it fills within a range beyond the stop instead of resting as a
+ * limit), so both terminal APIs refuse `BuyStopLimit` / `SellStopLimit` and on
+ * those accounts the SDK throws {@link UnsupportedOnPlatformError} for them
  * before anything is sent.
  */
 export const OrderOperation = {
