@@ -9,10 +9,12 @@
  */
 
 import {
+  Execution,
   OrderOperation,
   PENDING_OPERATIONS,
   STOP_LIMIT_OPERATIONS,
   Timeframe,
+  type ExecutionInput,
   type OrderOperationInput,
   type Platform,
   type TimeframeInput,
@@ -164,6 +166,50 @@ export function rejectUnsupportedOnPlatform(
     throw new UnsupportedOnPlatformError(
       `stopLimitPrice is not supported on ${gate.label} (${gate.reason})`,
     );
+  }
+}
+
+/** Resolve an `execution` input (any case) or throw `ValidationError`. */
+export function coerceExecution(
+  value: ExecutionInput | undefined,
+): Execution | undefined {
+  if (value === undefined) return undefined;
+  const norm = String(value).trim().toLowerCase();
+  const match = Object.values(Execution).find((e) => e.toLowerCase() === norm);
+  if (match === undefined) {
+    throw new ValidationError(`Unknown execution: ${inspect(value)} (EA or Manual)`);
+  }
+  return match;
+}
+
+/** Mirror the terminal's checks for `execution: 'Manual'`, fail-fast. */
+export function validateManualOrder(
+  platform: Platform,
+  operation: OrderOperation,
+  fields: {
+    magic?: number;
+    stopLimitPrice?: number;
+    expiration?: unknown;
+    expirationUtc?: unknown;
+  },
+): void {
+  if (platform === 'ctrader') {
+    throw new UnsupportedOnPlatformError(
+      'execution Manual is not supported on cTrader',
+    );
+  }
+  if (operation !== OrderOperation.BUY && operation !== OrderOperation.SELL) {
+    throw new ValidationError('execution Manual places market orders only (Buy, Sell)');
+  }
+  if (fields.magic !== undefined && fields.magic !== 0) {
+    throw new ValidationError('execution Manual orders always have magic 0');
+  }
+  if (
+    fields.stopLimitPrice !== undefined ||
+    fields.expiration !== undefined ||
+    fields.expirationUtc !== undefined
+  ) {
+    throw new ValidationError('execution Manual takes no stopLimitPrice, expiration');
   }
 }
 

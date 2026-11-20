@@ -40,7 +40,12 @@ import {
   decodeSymbolInfoBatch,
   decodeSymbolSelectResult,
 } from '../decode.js';
-import type { OrderOperationInput, Platform, TimeframeInput } from '../enums.js';
+import type {
+  ExecutionInput,
+  OrderOperationInput,
+  Platform,
+  TimeframeInput,
+} from '../enums.js';
 import { errorFromResponse, ValidationError } from '../errors.js';
 import type { ErrorResponse } from '../errors.js';
 import { HttpTransport } from '../http.js';
@@ -66,6 +71,7 @@ import type {
   TimeInput,
 } from '../types.js';
 import {
+  coerceExecution,
   coerceOperation,
   coerceTimeframe,
   compact,
@@ -75,6 +81,7 @@ import {
   resolveExpiration,
   resolveModifyStops,
   validateClientOrderId,
+  validateManualOrder,
   validateOrderSend,
   validateSymbolList,
 } from '../validate.js';
@@ -136,6 +143,15 @@ export interface OrderSendParams {
    * {@link ClientOrderIdReusedError}.
    */
   clientOrderId?: string;
+  /**
+   * `EA` (default) or `Manual`: see {@link Execution}. A Manual order goes
+   * through the account's own order dialog, for brokers that refuse expert
+   * trading. Market orders (`Buy` / `Sell`) only, magic 0, not on cTrader;
+   * anything else throws before sending. {@link ManualNotSentError} means
+   * nothing was sent. Needs bridge MT5 0.18.0 / MT4 0.16.0; older bridges
+   * ignore it and send the order the normal way.
+   */
+  execution?: ExecutionInput;
 }
 
 export interface OrderModifyParams {
@@ -162,6 +178,14 @@ export interface OrderCloseParams {
   volume?: number;
   /** Points; the terminal defaults to 10 when omitted. */
   slippage?: number;
+  /**
+   * Only delete a pending order, never close a position. If the order has
+   * filled by now, the position stays open and {@link NotPendingError} is
+   * thrown. On MT5 a partly filled order loses its unfilled rest and keeps
+   * the position. Needs bridge MT5 0.18.0 / MT4 0.16.0: older bridges ignore
+   * the flag and close the position, so check `status().bridge.version`.
+   */
+  pendingOnly?: boolean;
 }
 
 export interface CloseAllParams {
@@ -390,6 +414,10 @@ export class TerminalClient {
       stopLoss: params.stopLoss,
       takeProfit: params.takeProfit,
     });
+    const execution = coerceExecution(params.execution);
+    if (execution === 'Manual') {
+      validateManualOrder(this.platform, operation, params);
+    }
     const clientOrderId = validateClientOrderId(params.clientOrderId);
     const { expiration, expirationUtc } = resolveExpiration(params);
     const body = compact({
@@ -406,6 +434,7 @@ export class TerminalClient {
       comment: params.comment,
       expertId: params.magic,
       clientOrderId,
+      execution,
     });
     return this.trade('/OrderSend', body);
   }
@@ -450,6 +479,7 @@ export class TerminalClient {
       ticket,
       volume: params.volume,
       slippage: params.slippage,
+      pendingOnly: params.pendingOnly === true ? true : undefined,
     });
     return this.trade('/OrderClose', body);
   }

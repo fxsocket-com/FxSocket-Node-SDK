@@ -538,6 +538,8 @@ export function decodeHistoryTrade(raw: unknown): HistoryTrade {
     magic: int(w['magic']),
     comment: str(w['comment']),
     time: str(w['time']),
+    sl: num(w['sl']),
+    tp: num(w['tp']),
   };
 }
 
@@ -558,6 +560,8 @@ export function decodePositionTrade(raw: unknown): PositionTrade {
     netProfit: num(w['netProfit']),
     magic: int(w['magic']),
     comment: str(w['comment']),
+    sl: num(w['sl']),
+    tp: num(w['tp']),
   };
 }
 
@@ -855,6 +859,7 @@ function decodeAccountHealth(raw: unknown): AccountHealth {
     currency: str(w['currency']),
     type: str(w['type']),
     tradeAllowed: bool(w['tradeAllowed']),
+    authError: str(w['authError']),
   };
 }
 

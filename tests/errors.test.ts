@@ -287,6 +287,6 @@ describe('errorFromResponse', () => {
     for (const [key, value] of Object.entries(TerminalErrorCode)) {
       expect(value).toBe(key);
     }
-    expect(Object.keys(TerminalErrorCode)).toHaveLength(21);
+    expect(Object.keys(TerminalErrorCode)).toHaveLength(23);
   });
 });

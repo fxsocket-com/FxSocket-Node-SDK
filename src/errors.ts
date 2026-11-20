@@ -271,6 +271,20 @@ export class TradeAbandonedError extends TerminalTimeoutError {}
 export class ClientOrderIdReusedError extends FxSocketError {}
 
 /**
+ * A `pendingOnly` close found a position, not a pending order (HTTP 409
+ * `MRPC_NOT_PENDING`): the order filled before the delete. Nothing was
+ * closed; the position is yours to keep or close.
+ */
+export class NotPendingError extends FxSocketError {}
+
+/**
+ * A `Manual` order was not sent (HTTP 500 `MRPC_MANUAL_NOT_SENT`): a value
+ * read back from the order dialog did not match, so nothing went to the
+ * broker. Safe to repeat; the message says which step failed.
+ */
+export class ManualNotSentError extends FxSocketError {}
+
+/**
  * A requested feature doesn't exist on the account's platform.
  *
  * Thrown before anything is sent for a stop-limit order on MT4
@@ -361,6 +375,9 @@ export function errorFromResponse(response: ErrorResponse): FxSocketError {
     if (code === TerminalErrorCode.MRPC_CLIENT_ORDER_ID_REUSED) {
       return new ClientOrderIdReusedError(message, common);
     }
+    if (code === TerminalErrorCode.MRPC_NOT_PENDING) {
+      return new NotPendingError(message, common);
+    }
     return new DuplicateAccountError(message, common);
   }
   if (status === 402) {
@@ -403,6 +420,9 @@ export function errorFromResponse(response: ErrorResponse): FxSocketError {
       return new TradeAbandonedError(message, common);
     }
     return new TerminalTimeoutError(message, common);
+  }
+  if (code === TerminalErrorCode.MRPC_MANUAL_NOT_SENT) {
+    return new ManualNotSentError(message, common);
   }
   return new FxSocketError(message, common);
 }

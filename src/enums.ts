@@ -291,6 +291,24 @@ export const ExpirationMode = {
 } as const;
 export type ExpirationMode = (typeof ExpirationMode)[keyof typeof ExpirationMode];
 
+/**
+ * How `orderSend` places an order (the `execution` field).
+ *
+ * `EA` (the default) is the normal path. `MANUAL` goes through the account's
+ * own order dialog, so the broker records a manual order: for brokers that
+ * refuse expert trading (`AccountInfo.tradeExpert` is `false`, every order
+ * fails with retcode 10026). Manual orders are market orders only (`Buy` /
+ * `Sell`, optional SL/TP and comment), have magic 0 and take 1-3 s. Needs
+ * bridge MT5 0.18.0 / MT4 0.16.0; not on cTrader.
+ */
+export const Execution = {
+  EA: 'EA',
+  MANUAL: 'Manual',
+} as const;
+export type Execution = (typeof Execution)[keyof typeof Execution];
+/** An {@link Execution}, or the same value in any letter case. */
+export type ExecutionInput = Execution | (string & {});
+
 /** Roll-up status reported by the terminal `/status` endpoint. */
 export const HealthStatus = {
   READY: 'ready',
@@ -378,6 +396,10 @@ export const TerminalErrorCode = {
   MRPC_TICKET_BUSY: 'MRPC_TICKET_BUSY',
   /** 409: `clientOrderId` already used for a different order */
   MRPC_CLIENT_ORDER_ID_REUSED: 'MRPC_CLIENT_ORDER_ID_REUSED',
+  /** 409: `pendingOnly` close, but the ticket is a position by now */
+  MRPC_NOT_PENDING: 'MRPC_NOT_PENDING',
+  /** 500: a Manual order was not sent (a dialog value did not match) */
+  MRPC_MANUAL_NOT_SENT: 'MRPC_MANUAL_NOT_SENT',
   /** 503: no trade EA has registered yet */
   MRPC_TRADE_EA_NOT_READY: 'MRPC_TRADE_EA_NOT_READY',
   /** 500: the trade EA stopped before sending the request (nothing executed) */

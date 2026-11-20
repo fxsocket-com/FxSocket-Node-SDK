@@ -626,6 +626,12 @@ export interface OpenedOrder {
  * ticket. 0 on pods older than bridge MT5 0.14 / MT4 0.13. (Netting-account
  * caveat: a reversal `InOut` row reports the position it belongs to *after*
  * processing.)
+ *
+ * `sl` / `tp` are the stop-loss and take-profit levels, `0` when not set. On
+ * MT5 they are per deal: an `In` row carries the opening order's levels, an
+ * `Out` row the position's levels when it closed, a balance row `0`. On MT4
+ * they are the order's levels at close. Always `0` on bridges older than MT5
+ * 0.18.3 / MT4 0.16.2, and on cTrader.
  */
 export interface HistoryTrade {
   readonly ticket: number;
@@ -643,9 +649,17 @@ export interface HistoryTrade {
   readonly comment: string;
   /** Broker server time, as sent. Not a UTC timestamp. */
   readonly time: string;
+  readonly sl: number;
+  readonly tp: number;
 }
 
-/** A closed round-trip position (`GET /PositionHistory`). */
+/**
+ * A closed round-trip position (`GET /PositionHistory`).
+ *
+ * `sl` / `tp` are the stop-loss and take-profit the position carried when it
+ * closed (`0` = not set), the values the terminal's History tab shows. Always
+ * `0` on bridges older than MT5 0.18.3 / MT4 0.16.2, and on cTrader.
+ */
 export interface PositionTrade {
   readonly positionId: number;
   readonly symbol: string;
@@ -663,6 +677,8 @@ export interface PositionTrade {
   readonly netProfit: number;
   readonly magic: number;
   readonly comment: string;
+  readonly sl: number;
+  readonly tp: number;
 }
 
 /**
@@ -1028,6 +1044,13 @@ export interface AccountHealth {
   readonly currency: string;
   readonly type: string;
   readonly tradeAllowed: boolean;
+  /**
+   * The broker's reason for the last refused login while the account is not
+   * logged in, as the terminal words it (`Invalid account` for a wrong login
+   * or password). `''` while logged in, before the first refusal, and on
+   * bridges older than MT5 0.18.2 / MT4 0.16.1.
+   */
+  readonly authError: string;
 }
 
 /**

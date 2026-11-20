@@ -9,7 +9,9 @@ import {
   coerceTimeframe,
   decodeBridgeHealth,
   FxSocket,
+  ManualNotSentError,
   MT5_ONLY_TIMEFRAMES,
+  NotPendingError,
   OrderOperation,
   TerminalClient,
   TerminalNotReadyError,
@@ -1159,5 +1161,143 @@ describe('bridge pipeline health', () => {
       nonTradeQueueDepth: 0,
       tradeDeferred: 1,
     });
+  });
+});
+
+describe('bridges MT5 0.18.x / MT4 0.16.x', () => {
+  const deal = {
+    ticket: 2,
+    order: 1,
+    position: 1,
+    symbol: 'EURUSD',
+    type: 'Sell',
+    entry: 'Out',
+    volume: 0.01,
+    price: 1.1,
+    profit: 1,
+    commission: 0,
+    swap: 0,
+    magic: 0,
+    comment: '',
+    time: '2026-11-20T10:00:00.000Z',
+  };
+  const position = {
+    positionId: 1,
+    symbol: 'EURUSD',
+    type: 'Buy',
+    volume: 0.01,
+    openTime: '2026-11-20T09:00:00Z',
+    openPrice: 1.09,
+    closeTime: '2026-11-20T10:00:00Z',
+    closePrice: 1.1,
+    profit: 1,
+    swap: 0,
+    commission: 0,
+    netProfit: 1,
+    magic: 0,
+    comment: '',
+  };
+
+  it('decodes sl / tp on history rows', async () => {
+    mock.get('/OrderHistory', {
+      status: 200,
+      json: [{ ...deal, sl: 1.095, tp: 1.11 }],
+    });
+    mock.get('/PositionHistory', {
+      status: 200,
+      json: [{ ...position, sl: 1.085, tp: 1.1 }],
+    });
+    const [row] = await terminal().orderHistory();
+    const [pos] = await terminal().positionHistory();
+    expect([row!.sl, row!.tp]).toEqual([1.095, 1.11]);
+    expect([pos!.sl, pos!.tp]).toEqual([1.085, 1.1]);
+  });
+
+  it('defaults sl / tp to 0 on older bridges', async () => {
+    mock.get('/OrderHistory', { status: 200, json: [deal] });
+    mock.get('/PositionHistory', { status: 200, json: [position] });
+    const [row] = await terminal().orderHistory();
+    const [pos] = await terminal().positionHistory();
+    expect([row!.sl, row!.tp, pos!.sl, pos!.tp]).toEqual([0, 0, 0, 0]);
+  });
+
+  it('decodes account.authError on /status', async () => {
+    mock.get('/status', {
+      status: 200,
+      json: {
+        status: 'degraded',
+        account: { loggedIn: false, login: 7, authError: 'Invalid account' },
+      },
+    });
+    const health = await terminal().status();
+    expect(health.account.authError).toBe('Invalid account');
+  });
+
+  it('sends pendingOnly only when set', async () => {
+    const route = mock.post('/OrderClose', { status: 200, json: ORDER_OK });
+    await terminal().orderClose(100, { pendingOnly: true });
+    expect(route.sent).toEqual({ ticket: 100, pendingOnly: true });
+    await terminal().orderClose(100, { pendingOnly: false });
+    expect(route.sent).toEqual({ ticket: 100 });
+  });
+
+  it('maps MRPC_NOT_PENDING to NotPendingError', async () => {
+    mock.post('/OrderClose', {
+      status: 409,
+      json: { error: 'MRPC_NOT_PENDING', message: 'ticket is a position' },
+    });
+    await expect(terminal().orderClose(100, { pendingOnly: true })).rejects.toThrow(
+      NotPendingError,
+    );
+  });
+
+  it('sends execution Manual', async () => {
+    const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    await terminal('mt4').orderSend({
+      symbol: 'EURUSD',
+      operation: 'Buy',
+      volume: 0.01,
+      stopLoss: 1,
+      execution: 'manual',
+    });
+    expect(route.sent['execution']).toBe('Manual');
+    expect(route.sent['expertId']).toBeUndefined();
+  });
+
+  it('validates a Manual order before sending', async () => {
+    const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    const send = (extra: Record<string, unknown>, platform: Platform = 'mt5') =>
+      terminal(platform).orderSend({
+        symbol: 'EURUSD',
+        operation: 'Buy',
+        volume: 0.01,
+        execution: 'Manual',
+        ...extra,
+      });
+    await expect(send({ operation: 'BuyLimit', price: 1 })).rejects.toThrow(
+      ValidationError,
+    );
+    await expect(send({ magic: 7 })).rejects.toThrow(ValidationError);
+    await expect(send({ expiration: '2026-12-01T00:00:00' })).rejects.toThrow(
+      ValidationError,
+    );
+    await expect(send({ execution: 'Bot' })).rejects.toThrow(ValidationError);
+    await expect(send({}, 'ctrader')).rejects.toThrow(UnsupportedOnPlatformError);
+    expect(route.called).toBe(false);
+  });
+
+  it('maps MRPC_MANUAL_NOT_SENT to ManualNotSentError', async () => {
+    mock.post('/OrderSend', {
+      status: 500,
+      json: { error: 'MRPC_MANUAL_NOT_SENT', message: 'volume mismatch' },
+    });
+    await expect(
+      terminal().orderSend({
+        symbol: 'EURUSD',
+        operation: 'Sell',
+        volume: 0.01,
+        execution: 'Manual',
+      }),
+    ).rejects.toThrow(ManualNotSentError);
   });
 });
