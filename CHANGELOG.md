@@ -6,8 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-20
+
 Matches [FxSocket Python SDK](https://github.com/fxsocket-com/FxSocket-Python-SDK)
-at the same version.
+0.11.0.
 
 Support for terminal bridges MT5 0.18.3 / MT4 0.16.2. Everything new is
 additive: on older bridges the new fields keep their defaults.
@@ -271,6 +273,7 @@ WebSocket server:
   `maxQueueSize` (10,000 by default), emitting a `lag` event, so a fast tick
   feed cannot grow memory without bound.
 
+[0.11.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.11.0
 [0.10.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.10.0
 [0.9.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.9.0
 [0.8.0]: https://github.com/fxsocket-com/FxSocket-Node-SDK/releases/tag/v0.8.0
