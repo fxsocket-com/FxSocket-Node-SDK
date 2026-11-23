@@ -38,9 +38,14 @@ import type {
   CloseLegResult,
   CommissionRule,
   CommissionTier,
+  CtraderLinkResult,
+  CtraderSignIn,
+  CtraderSignInAccount,
+  CtraderSignInStarted,
   Health,
   HealthChecks,
   HistoryTrade,
+  JournalEntry,
   MarginCalc,
   OpenedOrder,
   OrderEventData,
@@ -174,6 +179,8 @@ export function decodeAccount(raw: unknown): Account {
     login: int(w['login']),
     status: enumStr(w['status'], 'connecting'),
     error: str(w['error']),
+    suspended: bool(w['suspended']),
+    reauthRequired: bool(w['reauth_required']),
     restUrl,
     wsUrl: str(w['ws_url']),
     proxyAddress: str(w['proxy_address']),
@@ -183,6 +190,73 @@ export function decodeAccount(raw: unknown): Account {
     createdAt: date(w['created_at']),
     hasTerminal: restUrl !== '',
   };
+}
+
+// --------------------------------------------------------------------------- //
+// Management API (v1) — cTrader sign-in
+// --------------------------------------------------------------------------- //
+
+export function decodeCtraderSignInStarted(raw: unknown): CtraderSignInStarted {
+  const w = asObject(raw);
+  return {
+    id: str(w['id']),
+    authorizeUrl: str(w['authorize_url']),
+    status: enumStr(w['status'], 'pending'),
+    expiresAt: date(w['expires_at']),
+  };
+}
+
+export function decodeCtraderSignInAccount(raw: unknown): CtraderSignInAccount {
+  const w = asObject(raw);
+  const unavailableReason = strOrNull(w['unavailable_reason']);
+  const linkedAccountId = strOrNull(w['linked_account_id']);
+  return {
+    ctraderAccountId: int(w['ctrader_account_id']),
+    login: int(w['login']),
+    broker: str(w['broker']),
+    live: bool(w['live']),
+    accountType: strOrNull(w['account_type']),
+    currency: strOrNull(w['currency']),
+    active: bool(w['active'], true),
+    unavailableReason,
+    linkedAccountId,
+    isAvailable: unavailableReason === null,
+    isLinked: linkedAccountId !== null,
+  };
+}
+
+export function decodeCtraderSignIn(raw: unknown): CtraderSignIn {
+  const w = asObject(raw);
+  const status: CtraderSignIn['status'] = enumStr(w['status'], 'pending');
+  const accounts = list(w['accounts'], decodeCtraderSignInAccount);
+  return {
+    id: str(w['id']),
+    status,
+    error: strOrNull(w['error']),
+    createdAt: date(w['created_at']),
+    expiresAt: date(w['expires_at']),
+    accounts,
+    isPending: status === 'pending',
+    isCompleted: status === 'completed',
+    linkableAccounts: accounts.filter((a) => a.isAvailable && !a.isLinked),
+  };
+}
+
+export function decodeCtraderLinkResult(raw: unknown): CtraderLinkResult {
+  const w = asObject(raw);
+  const hasAccount = typeof w['account'] === 'object' && w['account'] !== null;
+  return {
+    ctraderAccountId: int(w['ctrader_account_id']),
+    account: hasAccount ? decodeAccount(w['account']) : null,
+    error: strOrNull(w['error']),
+    detail: str(w['detail']),
+    isLinked: hasAccount,
+  };
+}
+
+/** The `accounts` of a `POST /ctrader/sign-ins/{id}/accounts` reply. */
+export function decodeCtraderLinkResults(raw: unknown): CtraderLinkResult[] {
+  return list(asObject(raw)['accounts'], decodeCtraderLinkResult);
 }
 
 export function decodePrivateServerAccount(raw: unknown): PrivateServerAccount {
@@ -496,6 +570,7 @@ export function decodeAccountInfo(raw: unknown): AccountInfo {
     tradeExpert: bool(w['tradeExpert']),
     limitOrders: int(w['limitOrders']),
     fifoClose: bool(w['fifoClose']),
+    limitedRisk: bool(w['limitedRisk']),
   };
 }
 
@@ -517,6 +592,8 @@ export function decodeOpenedOrder(raw: unknown): OpenedOrder {
     magic: int(w['magic']),
     comment: str(w['comment']),
     openTime: str(w['openTime']),
+    trailingStop: bool(w['trailingStop']),
+    guaranteedStopLoss: bool(w['guaranteedStopLoss']),
     isPending: kind.toLowerCase() === 'pending',
   };
 }
@@ -592,6 +669,38 @@ export function decodePendingOrder(raw: unknown): PendingOrder {
     comment: str(w['comment']),
     time: str(w['time']),
     timeUtc: strOrNull(w['timeUtc']),
+    trailingStop: bool(w['trailingStop']),
+    guaranteedStopLoss: bool(w['guaranteedStopLoss']),
+  };
+}
+
+/** The `entries` of a `GET /Journal` reply. */
+export function decodeJournal(raw: unknown): JournalEntry[] {
+  return list(asObject(raw)['entries'], decodeJournalEntry);
+}
+
+/** A free-form object field, or `null` when absent or not an object. */
+function objOrNull(value: unknown): Readonly<Record<string, unknown>> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+export function decodeJournalEntry(raw: unknown): JournalEntry {
+  const w = asObject(raw);
+  return {
+    seq: int(w['seq']),
+    time: str(w['time']),
+    kind: enumStr(w['kind'], 'trade'),
+    event: str(w['event']),
+    message: str(w['message']),
+    request: objOrNull(w['request']),
+    result: objOrNull(w['result']),
+    clientOrderId: strOrNull(w['clientOrderId']),
+    durationMs: intOrNull(w['durationMs']),
+    commandId: intOrNull(w['commandId']),
+    userAgent: strOrNull(w['userAgent']),
+    clientIp: strOrNull(w['clientIp']),
   };
 }
 
@@ -676,6 +785,8 @@ export function decodeSymbolInfo(raw: unknown): SymbolInfo {
     fillingModes: strList(w['fillingModes']),
     commissions: list(w['commissions'], decodeCommissionRule),
     sessions: list(w['sessions'], decodeTradingSession),
+    guaranteedStopLoss: bool(w['guaranteedStopLoss']),
+    gslDistance: int(w['gslDistance']),
   };
 }
 

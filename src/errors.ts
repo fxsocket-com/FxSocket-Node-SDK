@@ -68,7 +68,11 @@ export class ForbiddenError extends FxSocketError {}
  */
 export class NotBalanceFundedError extends ForbiddenError {}
 
-/** Too many requests (HTTP 429). `retryAfter` is seconds, if given. */
+/**
+ * Too many requests (HTTP 429). `retryAfter` is seconds, if given.
+ *
+ * Base class for {@link SignInLimitError}.
+ */
 export class RateLimitError extends FxSocketError {
   /** Seconds to wait before retrying, from the `Retry-After` header. */
   readonly retryAfter?: number;
@@ -82,8 +86,48 @@ export class RateLimitError extends FxSocketError {
   }
 }
 
-/** The request was rejected as malformed (HTTP 400 / `MRPC_VALIDATION`). */
+/**
+ * Too many cTrader sign-ins (HTTP 429): 20 are already waiting
+ * (`code === 'sign_in_pending_limit'`) or 60 were started in the last hour
+ * (`'sign_in_hourly_limit'`). `limit` is the limit that was hit, `retryAfter`
+ * the seconds to wait before starting another.
+ */
+export class SignInLimitError extends RateLimitError {
+  /** The limit that was hit, when reported. */
+  readonly limit?: number;
+
+  constructor(
+    message: string,
+    options: FxSocketErrorOptions & { retryAfter?: number; limit?: number } = {},
+  ) {
+    super(message, options);
+    this.limit = options.limit;
+  }
+}
+
+/**
+ * The request was rejected as malformed (HTTP 400 / `MRPC_VALIDATION`).
+ *
+ * Base class for {@link CtraderAccountNotInSignInError}.
+ */
 export class ValidationError extends FxSocketError {}
+
+/**
+ * The cTrader sign-in did not grant every account asked for (HTTP 400
+ * `ctrader_account_not_in_sign_in`). Nothing was linked. `ctraderAccountIds`
+ * lists the ones it does not grant.
+ */
+export class CtraderAccountNotInSignInError extends ValidationError {
+  readonly ctraderAccountIds: readonly number[];
+
+  constructor(
+    message: string,
+    options: FxSocketErrorOptions & { ctraderAccountIds?: readonly number[] } = {},
+  ) {
+    super(message, options);
+    this.ctraderAccountIds = options.ctraderAccountIds ?? [];
+  }
+}
 
 /** The referenced account or resource does not exist (HTTP 404). */
 export class NotFoundError extends FxSocketError {}
@@ -161,6 +205,38 @@ export class SeatLapsedError extends PaymentRequiredError {}
 
 /** This account is already linked (HTTP 409). */
 export class DuplicateAccountError extends FxSocketError {}
+
+/**
+ * Accounts can only be linked from a completed cTrader sign-in (HTTP 409
+ * `sign_in_not_completed`). `signInStatus` is the sign-in's status
+ * (`pending`, `denied` or `failed`). Wait for a pending one, or start a new
+ * sign-in.
+ */
+export class SignInNotCompletedError extends FxSocketError {
+  /** The sign-in's status, when reported. */
+  readonly signInStatus?: string;
+
+  constructor(
+    message: string,
+    options: FxSocketErrorOptions & { signInStatus?: string } = {},
+  ) {
+    super(message, options);
+    this.signInStatus = options.signInStatus;
+  }
+}
+
+/**
+ * The cTrader sign-in has expired (HTTP 410 `sign_in_expired`). Accounts can be
+ * linked for 60 minutes after the user came back from cTrader. Start a new
+ * sign-in.
+ */
+export class SignInExpiredError extends FxSocketError {}
+
+/**
+ * cTrader no longer accepts this sign-in (HTTP 409 `ctrader_reauth_required`):
+ * the user revoked the access since. Start a new sign-in.
+ */
+export class CtraderReauthRequiredError extends FxSocketError {}
 
 /**
  * Every purchased slot on the private server is taken (HTTP 409 `slots_full`).
@@ -287,9 +363,15 @@ export class ManualNotSentError extends FxSocketError {}
 /**
  * A requested feature doesn't exist on the account's platform.
  *
- * Thrown before anything is sent for a stop-limit order on MT4
- * (`BuyStopLimit` / `SellStopLimit`, or `stopLimitPrice` on `orderModify`):
- * MT4 has no stop-limit order type.
+ * Thrown before anything is sent:
+ *
+ * - stop-limit orders on MT4 and cTrader (`BuyStopLimit` / `SellStopLimit`,
+ *   or `stopLimitPrice` on `orderModify`);
+ * - `execution: 'Manual'` on cTrader;
+ * - the cTrader-only parts on MT4 and MT5: `trailingStop: true` and
+ *   `guaranteedStopLoss: true` on `orderSend` / `orderModify`, `clientOrderId`
+ *   on `orderModify` / `orderClose`, and `journal()`. The MT terminals would
+ *   silently ignore the fields, and they have no `/Journal` route.
  */
 export class UnsupportedOnPlatformError extends FxSocketError {}
 
@@ -313,6 +395,11 @@ const IDEMPOTENCY_CODES: ReadonlySet<string> = new Set([
   'idempotency_in_flight',
   'idempotency_key_reused',
   'idempotency_unavailable',
+]);
+
+const SIGN_IN_LIMIT_CODES: ReadonlySet<string> = new Set([
+  'sign_in_pending_limit',
+  'sign_in_hourly_limit',
 ]);
 
 function intOrUndefined(value: unknown): number | undefined {
@@ -353,13 +440,28 @@ export function errorFromResponse(response: ErrorResponse): FxSocketError {
   if (status === 429) {
     const raw = response.headers['retry-after'];
     const parsed = raw === undefined ? Number.NaN : Number(raw);
-    return new RateLimitError(message, {
-      ...common,
-      retryAfter: Number.isFinite(parsed) ? parsed : undefined,
-    });
+    const retryAfter = Number.isFinite(parsed) ? parsed : undefined;
+    if (code !== undefined && SIGN_IN_LIMIT_CODES.has(code)) {
+      return new SignInLimitError(message, {
+        ...common,
+        retryAfter,
+        limit: intOrUndefined(body['limit']),
+      });
+    }
+    return new RateLimitError(message, { ...common, retryAfter });
   }
   if (status === 404) return new NotFoundError(message, common);
+  if (code === 'sign_in_expired') return new SignInExpiredError(message, common);
   if (status === 409) {
+    if (code === 'sign_in_not_completed') {
+      return new SignInNotCompletedError(message, {
+        ...common,
+        signInStatus: stringOrUndefined(body['status']),
+      });
+    }
+    if (code === 'ctrader_reauth_required') {
+      return new CtraderReauthRequiredError(message, common);
+    }
     if (code === 'slots_full') {
       return new SlotsFullError(message, {
         ...common,
@@ -406,6 +508,17 @@ export function errorFromResponse(response: ErrorResponse): FxSocketError {
   if (status === 400) {
     if (code !== undefined && CONNECT_CODES.has(code)) {
       return new ConnectFailedError(message, common);
+    }
+    if (code === 'ctrader_account_not_in_sign_in') {
+      const ids = Array.isArray(body['ctrader_account_ids'])
+        ? body['ctrader_account_ids']
+        : [];
+      return new CtraderAccountNotInSignInError(message, {
+        ...common,
+        ctraderAccountIds: ids
+          .map((id) => intOrUndefined(id))
+          .filter((id): id is number => id !== undefined),
+      });
     }
     return new ValidationError(message, common);
   }

@@ -47,6 +47,8 @@ function account(restUrl = TERM, platform: Platform = 'mt5'): Account {
     login: 1,
     status: 'connected',
     error: '',
+    suspended: false,
+    reauthRequired: false,
     restUrl,
     wsUrl: 'wss://term.test/ws',
     proxyAddress: '',
@@ -865,7 +867,11 @@ describe('pendingOrders', () => {
       json: [PENDING_ROW, { ticket: 502, symbol: 'GBPUSD', type: 'SellLimit' }],
     });
     const [first, second] = await terminal().pendingOrders();
-    expect(first).toEqual(PENDING_ROW);
+    expect(first).toEqual({
+      ...PENDING_ROW,
+      trailingStop: false,
+      guaranteedStopLoss: false,
+    });
     expect(second!.expirationMode).toBe('');
     expect(second!.timeUtc).toBeNull();
   });
@@ -1299,5 +1305,358 @@ describe('bridges MT5 0.18.x / MT4 0.16.x', () => {
         execution: 'Manual',
       }),
     ).rejects.toThrow(ManualNotSentError);
+  });
+});
+
+// --------------------------------------------------------------------------- //
+// cTrader bridge 0.1.6: stop loss kinds, clientOrderId on modify / close, the
+// journal and the new row fields
+// --------------------------------------------------------------------------- //
+
+const OPENED_ROW = {
+  ticket: 1,
+  symbol: 'EURUSD',
+  type: 'Buy',
+  kind: 'Position',
+  lots: 0.1,
+  openPrice: 1.08,
+  currentPrice: 1.085,
+  stopLoss: 1.07,
+  takeProfit: 0,
+  swap: 0,
+  profit: 5,
+  magic: 0,
+  comment: '',
+  openTime: '2026-11-23T10:00:00Z',
+};
+
+const SYMBOL_SPEC = {
+  symbol: 'EURUSD',
+  description: '',
+  digits: 5,
+  point: 0.00001,
+  tickSize: 0.00001,
+  tickValue: 1,
+  contractSize: 100000,
+  volumeMin: 0.01,
+  volumeMax: 500,
+  volumeStep: 0.01,
+  stopsLevel: 0,
+  freezeLevel: 0,
+  spread: 15,
+  tradeMode: 'Full',
+  swapLong: 0,
+  swapShort: 0,
+  bid: 1,
+  ask: 1,
+  currencyBase: 'EUR',
+  currencyProfit: 'USD',
+  currencyMargin: 'USD',
+};
+
+const JOURNAL = {
+  entries: [
+    {
+      seq: 12,
+      time: '2026-11-23T14:05:01.234Z',
+      kind: 'trade',
+      event: 'OrderClose',
+      message: 'OrderClose 7: done',
+      request: { ticket: 7, volume: 0.01 },
+      result: { success: true, retcode: 10009, deal: 99 },
+      clientOrderId: 'close-1',
+      durationMs: 84,
+      commandId: 3,
+      userAgent: 'fxsocket-node/0.12.0',
+      clientIp: '203.0.113.9',
+    },
+    {
+      seq: 1,
+      time: '2026-11-23T13:00:00.000Z',
+      kind: 'connection',
+      event: 'signed_in',
+      message: 'signed in',
+    },
+  ],
+};
+
+describe('cTrader stop loss kinds', () => {
+  it('sends trailingStop and guaranteedStopLoss on orderSend', async () => {
+    const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    await terminal('ctrader').orderSend({
+      symbol: 'EURUSD',
+      operation: 'Buy',
+      volume: 0.01,
+      stopLoss: 1.07,
+      trailingStop: true,
+      guaranteedStopLoss: false,
+    });
+    expect(route.sent).toMatchObject({
+      stopLoss: 1.07,
+      trailingStop: true,
+      guaranteedStopLoss: false,
+    });
+  });
+
+  it.each([
+    { trailingStop: true },
+    { guaranteedStopLoss: true },
+    { guaranteedStopLoss: true, stopLoss: 0 },
+  ])('needs a stop loss on orderSend (%o)', async (extra) => {
+    const route = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    await expect(
+      terminal('ctrader').orderSend({
+        symbol: 'EURUSD',
+        operation: 'Buy',
+        volume: 0.01,
+        ...extra,
+      }),
+    ).rejects.toThrow(/stopLoss/);
+    expect(route.called).toBe(false);
+  });
+
+  it.each(['mt4', 'mt5'] as const)(
+    'refuses true on %s before sending',
+    async (platform) => {
+      const send = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+      const modify = mock.post('/OrderModify', { status: 200, json: ORDER_OK });
+      for (const field of ['trailingStop', 'guaranteedStopLoss'] as const) {
+        await expect(
+          terminal(platform).orderSend({
+            symbol: 'EURUSD',
+            operation: 'Buy',
+            volume: 0.01,
+            stopLoss: 1.07,
+            [field]: true,
+          }),
+        ).rejects.toThrow(UnsupportedOnPlatformError);
+        await expect(
+          terminal(platform).orderModify(1, { [field]: true }),
+        ).rejects.toThrow(/cTrader/);
+      }
+      expect(send.called).toBe(false);
+      expect(modify.called).toBe(false);
+    },
+  );
+
+  it('does not send false on MT', async () => {
+    const send = mock.post('/OrderSend', { status: 200, json: ORDER_OK });
+    const modify = mock.post('/OrderModify', { status: 200, json: ORDER_OK });
+    await terminal('mt5').orderSend({
+      symbol: 'EURUSD',
+      operation: 'Buy',
+      volume: 0.01,
+      trailingStop: false,
+      guaranteedStopLoss: false,
+    });
+    expect(send.sent).not.toHaveProperty('trailingStop');
+    expect(send.sent).not.toHaveProperty('guaranteedStopLoss');
+    await terminal('mt5').orderModify(1, { stopLoss: 1.07, trailingStop: false });
+    expect(modify.sent).toEqual({ ticket: 1, stopLoss: 1.07 });
+  });
+
+  it('rejects a non-boolean', async () => {
+    await expect(
+      terminal('ctrader').orderModify(1, { trailingStop: 'yes' as unknown as boolean }),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it('sends the kinds and a clientOrderId on orderModify', async () => {
+    const route = mock.post('/OrderModify', {
+      status: 200,
+      json: { ...ORDER_OK, clientOrderId: 'mod-1' },
+      headers: { 'idempotent-replayed': 'true' },
+    });
+    const result = await terminal('ctrader').orderModify(7, {
+      trailingStop: false,
+      guaranteedStopLoss: true,
+      clientOrderId: 'mod-1',
+    });
+    expect(route.sent).toEqual({
+      ticket: 7,
+      trailingStop: false,
+      guaranteedStopLoss: true,
+      clientOrderId: 'mod-1',
+    });
+    expect(result.idempotentReplayed).toBe(true);
+    expect(result.clientOrderId).toBe('mod-1');
+  });
+
+  it('refuses clearStopLoss together with a stop loss kind', async () => {
+    await expect(
+      terminal('ctrader').orderModify(7, { clearStopLoss: true, trailingStop: true }),
+    ).rejects.toThrow(ValidationError);
+  });
+});
+
+describe('cTrader clientOrderId on orderClose', () => {
+  it('sends it and surfaces the replay', async () => {
+    const route = mock.post('/OrderClose', {
+      status: 200,
+      json: ORDER_OK,
+      headers: { 'idempotent-replayed': 'true' },
+    });
+    const result = await terminal('ctrader').orderClose(7, {
+      volume: 0.01,
+      clientOrderId: 'close-1',
+    });
+    expect(route.sent).toEqual({ ticket: 7, volume: 0.01, clientOrderId: 'close-1' });
+    expect(result.idempotentReplayed).toBe(true);
+  });
+
+  it('maps a reused id to ClientOrderIdReusedError', async () => {
+    mock.post('/OrderClose', {
+      status: 409,
+      json: { error: 'MRPC_CLIENT_ORDER_ID_REUSED', message: 'already used' },
+    });
+    await expect(
+      terminal('ctrader').orderClose(7, { clientOrderId: 'send-1' }),
+    ).rejects.toThrow(ClientOrderIdReusedError);
+  });
+
+  it.each(['mt4', 'mt5'] as const)(
+    'refuses it on %s for modify and close',
+    async (platform) => {
+      const modify = mock.post('/OrderModify', { status: 200, json: ORDER_OK });
+      const close = mock.post('/OrderClose', { status: 200, json: ORDER_OK });
+      await expect(
+        terminal(platform).orderModify(1, { stopLoss: 1.07, clientOrderId: 'x' }),
+      ).rejects.toThrow(/orderModify/);
+      await expect(
+        terminal(platform).orderClose(1, { clientOrderId: 'x' }),
+      ).rejects.toThrow(UnsupportedOnPlatformError);
+      expect(modify.called).toBe(false);
+      expect(close.called).toBe(false);
+    },
+  );
+
+  it.each(['', 'x'.repeat(65), 5])('validates it on cTrader (%o)', async (bad) => {
+    await expect(
+      terminal('ctrader').orderModify(1, {
+        stopLoss: 1,
+        clientOrderId: bad as unknown as string,
+      }),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      terminal('ctrader').orderClose(1, { clientOrderId: bad as unknown as string }),
+    ).rejects.toThrow(ValidationError);
+  });
+});
+
+describe('journal', () => {
+  it('sends the query and decodes the entries', async () => {
+    const route = mock.get('/Journal', { status: 200, json: JOURNAL });
+    const entries = await terminal('ctrader').journal({
+      limit: 50,
+      since: new Date('2026-11-23T12:00:00.250Z'),
+      kind: 'trade',
+    });
+    expect(Object.fromEntries(route.last.query)).toEqual({
+      limit: '50',
+      since: '2026-11-23T12:00:00.250Z',
+      kind: 'trade',
+    });
+    const [trade, connection] = entries;
+    expect(trade).toEqual({
+      seq: 12,
+      time: '2026-11-23T14:05:01.234Z',
+      kind: 'trade',
+      event: 'OrderClose',
+      message: 'OrderClose 7: done',
+      request: { ticket: 7, volume: 0.01 },
+      result: { success: true, retcode: 10009, deal: 99 },
+      clientOrderId: 'close-1',
+      durationMs: 84,
+      commandId: 3,
+      userAgent: 'fxsocket-node/0.12.0',
+      clientIp: '203.0.113.9',
+    });
+    expect(connection).toMatchObject({
+      kind: 'connection',
+      event: 'signed_in',
+      request: null,
+      result: null,
+      clientOrderId: null,
+      durationMs: null,
+      commandId: null,
+    });
+  });
+
+  it('sends no query by default and passes a since string through', async () => {
+    const route = mock.get('/Journal', { status: 200, json: { entries: [] } });
+    expect(await terminal('ctrader').journal()).toEqual([]);
+    expect([...route.last.query.keys()]).toEqual([]);
+    await terminal('ctrader').journal({
+      since: '2026-11-22T21:00:00Z',
+      kind: 'connection',
+    });
+    expect(route.last.query.get('since')).toBe('2026-11-22T21:00:00Z');
+    expect(route.last.query.get('kind')).toBe('connection');
+  });
+
+  it.each([{ limit: 0 }, { limit: 1001 }, { limit: 1.5 }, { kind: 'x' }])(
+    'validates %o before sending',
+    async (params) => {
+      const route = mock.get('/Journal', { status: 200, json: { entries: [] } });
+      await expect(
+        terminal('ctrader').journal(params as Parameters<TerminalClient['journal']>[0]),
+      ).rejects.toThrow(ValidationError);
+      expect(route.called).toBe(false);
+    },
+  );
+
+  it.each(['mt4', 'mt5'] as const)('is refused on %s', async (platform) => {
+    const route = mock.get('/Journal', { status: 404, json: {} });
+    await expect(terminal(platform).journal()).rejects.toThrow(
+      UnsupportedOnPlatformError,
+    );
+    expect(route.called).toBe(false);
+  });
+});
+
+describe('cTrader row fields', () => {
+  it('decodes trailingStop and guaranteedStopLoss on positions and pending orders', async () => {
+    mock.get('/OpenedOrders', {
+      status: 200,
+      json: [
+        { ...OPENED_ROW, trailingStop: true, guaranteedStopLoss: true },
+        OPENED_ROW,
+      ],
+    });
+    mock.get('/PendingOrders', {
+      status: 200,
+      json: [{ ...PENDING_ROW, trailingStop: true }],
+    });
+    const [ctrader, mt] = await terminal('ctrader').openedOrders();
+    expect(ctrader).toMatchObject({ trailingStop: true, guaranteedStopLoss: true });
+    expect(mt).toMatchObject({ trailingStop: false, guaranteedStopLoss: false });
+    const [pending] = await terminal('ctrader').pendingOrders();
+    expect(pending).toMatchObject({ trailingStop: true, guaranteedStopLoss: false });
+  });
+
+  it('decodes limitedRisk and the symbol guaranteed stop loss fields', async () => {
+    mock.get(
+      '/AccountInfo',
+      { status: 200, json: { name: 'J', login: 1, limitedRisk: true } },
+      { status: 200, json: { name: 'J', login: 1 } },
+    );
+    mock.get(
+      '/SymbolInfo',
+      {
+        status: 200,
+        json: { ...SYMBOL_SPEC, guaranteedStopLoss: true, gslDistance: 50 },
+      },
+      { status: 200, json: SYMBOL_SPEC },
+    );
+    expect((await terminal('ctrader').accountInfo()).limitedRisk).toBe(true);
+    expect((await terminal('ctrader').accountInfo()).limitedRisk).toBe(false);
+    expect(await terminal('ctrader').symbolInfo('EURUSD')).toMatchObject({
+      guaranteedStopLoss: true,
+      gslDistance: 50,
+    });
+    expect(await terminal('ctrader').symbolInfo('EURUSD')).toMatchObject({
+      guaranteedStopLoss: false,
+      gslDistance: 0,
+    });
   });
 });

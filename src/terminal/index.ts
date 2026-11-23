@@ -9,6 +9,7 @@
 export {
   TerminalClient,
   type CloseAllParams,
+  type JournalParams,
   type OrderCloseParams,
   type OrderModifyParams,
   type OrderSendParams,

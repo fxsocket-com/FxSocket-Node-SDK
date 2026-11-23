@@ -1,8 +1,9 @@
 /**
  * The top-level entry point: {@link FxSocket}.
  *
- * It exposes the management API — `.accounts`, `.privateServers`,
- * `.readonlyKeys`, `.wallet` and `.orders` (multi-account trading) — plus
+ * It exposes the management API — `.accounts`, `.ctraderSignIns`,
+ * `.privateServers`, `.readonlyKeys`, `.wallet` and `.orders` (multi-account
+ * trading) — plus
  * `.terminal(account)` (the per-account terminal REST client) and
  * `.stream(account)` (WebSocket streaming).
  */
@@ -13,6 +14,7 @@ import { DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS, ENV_API_KEY } from './config.js';
 import { AuthError, TerminalNotReadyError } from './errors.js';
 import { HttpTransport } from './http.js';
 import { Accounts } from './management/accounts.js';
+import { CtraderSignIns } from './management/ctrader-sign-ins.js';
 import { PrivateServers } from './management/private-servers.js';
 import { ReadOnlyKeys } from './management/readonly-keys.js';
 import { WalletResource } from './management/wallet.js';
@@ -101,6 +103,8 @@ function resolveApiKey(apiKey?: string): string {
 export class FxSocket {
   /** Account management (the v1 API). */
   readonly accounts: Accounts;
+  /** Link cTrader accounts with a cTrader sign-in (the v1 API). */
+  readonly ctraderSignIns: CtraderSignIns;
   /** Private hosting servers (the v1 API). */
   readonly privateServers: PrivateServers;
   /** Multi-account trading — one order / close fanned out to several accounts. */
@@ -136,6 +140,7 @@ export class FxSocket {
     });
 
     this.accounts = new Accounts(this.http);
+    this.ctraderSignIns = new CtraderSignIns(this.http);
     this.privateServers = new PrivateServers(this.http);
     this.orders = new Orders(this.http);
     this.readonlyKeys = new ReadOnlyKeys(this.http);

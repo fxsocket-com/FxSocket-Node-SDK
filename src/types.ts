@@ -24,9 +24,11 @@ import type {
   CloseKind,
   CloseLegStatus,
   CloseSide,
+  CtraderSignInStatus,
   DealEntry,
   ExpirationMode,
   HealthStatus,
+  JournalKind,
   KeyScope,
   OrderEventKind,
   OrderKind,
@@ -56,6 +58,12 @@ import type {
  * the terminal is routed through (empty / `null` when there is none; the proxy
  * credentials are never returned). `tradeEaSymbol` is the chart symbol hosting
  * the trade expert — empty means the terminal picked one automatically.
+ *
+ * `suspended` is true while billing has suspended the account: it reads
+ * `disconnected` and stays down until it is paid for and reconnected.
+ * `reauthRequired` is cTrader only: true when cTrader no longer accepts the
+ * account's sign-in (the user revoked the access), so it stays down until the
+ * owner signs in again. Always false on MT4 and MT5.
  */
 export interface Account {
   readonly id: string;
@@ -65,6 +73,8 @@ export interface Account {
   readonly login: number;
   readonly status: TradingStatus;
   readonly error: string;
+  readonly suspended: boolean;
+  readonly reauthRequired: boolean;
   readonly restUrl: string;
   readonly wsUrl: string;
   readonly proxyAddress: string;
@@ -197,6 +207,105 @@ export interface ReadOnlyKey {
 /** Anything usable where an account id is expected. */
 export type AccountRef = string | Account | PrivateServerAccount;
 
+// --------------------------------------------------------------------------- //
+// Management API (v1) — cTrader sign-in
+// --------------------------------------------------------------------------- //
+
+/**
+ * A new cTrader sign-in (`client.ctraderSignIns.create()`).
+ *
+ * Send the user's browser to `authorizeUrl`, cTrader's consent page (a redirect
+ * or a new tab, not an iframe). The user has until `expiresAt` (10 minutes) to
+ * finish it. `status` is `pending`.
+ */
+export interface CtraderSignInStarted {
+  readonly id: string;
+  readonly authorizeUrl: string;
+  readonly status: CtraderSignInStatus;
+  readonly expiresAt: Date;
+}
+
+/**
+ * One cTrader trading account a completed sign-in granted.
+ *
+ * `ctraderAccountId` is cTrader's id for it, the one to link it by. `login` is
+ * the account number the user knows. `accountType` is `hedged`, `netted` or
+ * `null`, `currency` the deposit currency or `null`. `unavailableReason` is
+ * `null` when the account can be linked, else the error linking it would
+ * answer (`ctrader_inactive`, `ctrader_live_not_allowed` or
+ * `ctrader_netting_not_allowed`). `linkedAccountId` is your FxSocket account
+ * id when the account is linked already.
+ */
+export interface CtraderSignInAccount {
+  readonly ctraderAccountId: number;
+  readonly login: number;
+  readonly broker: string;
+  readonly live: boolean;
+  readonly accountType: string | null;
+  readonly currency: string | null;
+  readonly active: boolean;
+  readonly unavailableReason: string | null;
+  readonly linkedAccountId: string | null;
+  /** *Derived.* True when nothing stands in the way of linking it. */
+  readonly isAvailable: boolean;
+  /** *Derived.* True when it is one of your FxSocket accounts already. */
+  readonly isLinked: boolean;
+}
+
+/**
+ * How a cTrader sign-in went (`client.ctraderSignIns.get()`).
+ *
+ * `error` is `null`, or why it did not complete (`access_denied`,
+ * `code_refused`, `token_refused`, `ctrader_unreachable`, `ctrader_refused`,
+ * `missing_code`, `ctrader_unavailable` or `internal_error`). `accounts` is
+ * empty unless `completed`. While pending, `expiresAt` is the deadline for the
+ * consent page; after it, how long the result can be read and linked (60
+ * minutes).
+ */
+export interface CtraderSignIn {
+  readonly id: string;
+  readonly status: CtraderSignInStatus;
+  readonly error: string | null;
+  readonly createdAt: Date;
+  readonly expiresAt: Date;
+  readonly accounts: readonly CtraderSignInAccount[];
+  /** *Derived.* `status === 'pending'`. */
+  readonly isPending: boolean;
+  /** *Derived.* `status === 'completed'`. */
+  readonly isCompleted: boolean;
+  /** *Derived.* The granted accounts that can be linked and are not linked yet. */
+  readonly linkableAccounts: readonly CtraderSignInAccount[];
+}
+
+/**
+ * One account to link with `client.ctraderSignIns.linkAccounts()`: its
+ * `ctraderAccountId`, a granted row, or an object with `ctraderAccountId` and
+ * an optional `nickname`.
+ */
+export type CtraderAccountInput =
+  | number
+  | CtraderSignInAccount
+  | { readonly ctraderAccountId: number; readonly nickname?: string };
+
+/**
+ * What happened to one account of `client.ctraderSignIns.linkAccounts()`.
+ *
+ * `account` is the linked account (`connecting` or `connected`; poll
+ * `client.accounts.get()`), or `null` on error. `error` is then the reason
+ * (`account_cap_reached`, `seat_lapsed`, `insufficient_balance`,
+ * `no_subscription`, `duplicate`, `ctrader_inactive`,
+ * `ctrader_live_not_allowed` or `ctrader_netting_not_allowed`) and `detail`
+ * says it in words.
+ */
+export interface CtraderLinkResult {
+  readonly ctraderAccountId: number;
+  readonly account: Account | null;
+  readonly error: string | null;
+  readonly detail: string;
+  /** *Derived.* True when the account was linked. */
+  readonly isLinked: boolean;
+}
+
 /** A moment in time, as an ISO string or a `Date`. */
 export type TimeInput = string | Date;
 
@@ -229,6 +338,17 @@ export interface OrderFields {
   magic?: number;
   /** The API's own spelling of {@link OrderFields.magic}; either is accepted. */
   expertId?: number;
+  /**
+   * cTrader only: the stop loss trails the price. Needs `stopLoss`. A leg for
+   * an MT4 or MT5 account with it set to `true` fails the whole batch
+   * (`400 invalid_batch`).
+   */
+  trailingStop?: boolean;
+  /**
+   * cTrader only: a guaranteed stop loss, where the broker offers it. Needs
+   * `stopLoss`. Same rule for MT4 / MT5 legs as `trailingStop`.
+   */
+  guaranteedStopLoss?: boolean;
 }
 
 /**
@@ -571,6 +691,10 @@ export interface AccountSummary {
  *
  * On MT4 `marginMode` is always `'Hedging'` and `fifoClose` always `false` (the
  * platform has no native equivalent).
+ *
+ * `limitedRisk` is cTrader only (bridge 0.1.6): a limited-risk account takes
+ * guaranteed stop losses only, so every order gets one by default and needs a
+ * `stopLoss`. Always `false` on MT4 and MT5.
  */
 export interface AccountInfo {
   readonly name: string;
@@ -589,9 +713,16 @@ export interface AccountInfo {
   readonly tradeExpert: boolean;
   readonly limitOrders: number;
   readonly fifoClose: boolean;
+  readonly limitedRisk: boolean;
 }
 
-/** An open position or resting pending order (`GET /OpenedOrders`). */
+/**
+ * An open position or resting pending order (`GET /OpenedOrders`, and the rows
+ * of the `positions` stream).
+ *
+ * `trailingStop` and `guaranteedStopLoss` are cTrader only (bridge 0.1.6): the
+ * stop loss trails the price, or is guaranteed. Always `false` on MT4 and MT5.
+ */
 export interface OpenedOrder {
   readonly ticket: number;
   readonly symbol: string;
@@ -608,6 +739,8 @@ export interface OpenedOrder {
   readonly comment: string;
   /** Broker server time, as sent. Not a UTC timestamp. */
   readonly openTime: string;
+  readonly trailingStop: boolean;
+  readonly guaranteedStopLoss: boolean;
   /** *Derived.* True for a resting pending order (vs. a live position). */
   readonly isPending: boolean;
 }
@@ -702,6 +835,10 @@ export interface ServerTimezone {
  * the server clock (its first second). On MT4 `stopLimitPrice` is always 0,
  * `volumeInitial` equals `volume`, and `expirationMode` is `gtc` or
  * `specified`. Bridges MT5 0.17.0+ / MT4 0.15.0+.
+ *
+ * `trailingStop` and `guaranteedStopLoss` are cTrader only (bridge 0.1.6): the
+ * stop loss the fill gets trails the price, or is guaranteed. Always `false` on
+ * MT4 and MT5.
  */
 export interface PendingOrder {
   readonly ticket: number;
@@ -731,6 +868,43 @@ export interface PendingOrder {
   readonly time: string;
   /** `time` in real UTC, or `null` when the bridge has not read the clock yet. */
   readonly timeUtc: string | null;
+  readonly trailingStop: boolean;
+  readonly guaranteedStopLoss: boolean;
+}
+
+/**
+ * One entry of a cTrader account's journal (`journal()`, bridge 0.1.6).
+ *
+ * `seq` numbers the entries per account from 1, oldest first. `time` is real
+ * UTC with milliseconds (not broker server time). `kind` is `connection` (the
+ * account's link to cTrader) or `trade` (a trade request and its outcome).
+ *
+ * `event` for `connection`: `started`, `updated`, `signed_in`,
+ * `sign_in_failed`, `ready`, `connection_lost`, `connected`,
+ * `token_invalidated`, `token_replaced`, `signed_in_again`,
+ * `sign_in_again_failed`. For `trade`: `OrderSend`, `OrderModify`,
+ * `OrderClose`, `CloseAll`, `replayed` (a repeat answered with the first
+ * request's outcome) and `refused` (turned away before it reached cTrader).
+ *
+ * Trade entries carry `request` (the request as the bridge understood it) and
+ * `result` (`success`, `retcode`, `order`, `deal`, `position`, `volume`,
+ * `price` and `comment`, or `error` and `message`), both free-form, plus
+ * `clientOrderId`, `durationMs`, `commandId`, the caller's `userAgent` and its
+ * `clientIp` as the gateway saw it. Each is `null` when absent.
+ */
+export interface JournalEntry {
+  readonly seq: number;
+  readonly time: string;
+  readonly kind: JournalKind;
+  readonly event: string;
+  readonly message: string;
+  readonly request: Readonly<Record<string, unknown>> | null;
+  readonly result: Readonly<Record<string, unknown>> | null;
+  readonly clientOrderId: string | null;
+  readonly durationMs: number | null;
+  readonly commandId: number | null;
+  readonly userAgent: string | null;
+  readonly clientIp: string | null;
 }
 
 // --------------------------------------------------------------------------- //
@@ -810,6 +984,11 @@ export interface TradingSession {
  * broker server time. Both default to empty on pods older than bridge 0.10 (and
  * `commissions` also when the broker publishes none or the terminal predates
  * the API — build 6060+).
+ *
+ * `guaranteedStopLoss` and `gslDistance` are cTrader only (bridge 0.1.6): the
+ * broker takes guaranteed stop losses on this symbol, and the least distance in
+ * points between one and the market (0 when there is none). `false` / `0` on
+ * MT4 and MT5.
  */
 export interface SymbolInfo {
   readonly symbol: string;
@@ -845,6 +1024,8 @@ export interface SymbolInfo {
   readonly fillingModes: readonly string[];
   readonly commissions: readonly CommissionRule[];
   readonly sessions: readonly TradingSession[];
+  readonly guaranteedStopLoss: boolean;
+  readonly gslDistance: number;
 }
 
 /** One symbol of a bulk lookup that did not resolve. */

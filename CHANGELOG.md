@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Matches [FxSocket Python SDK](https://github.com/fxsocket-com/FxSocket-Python-SDK)
+at the same version.
+
+cTrader sign-in through the API, and the trading extras of cTrader bridge
+0.1.6. Everything new is additive: MT4 and MT5 rows keep the defaults.
+
+### Added
+
+- `fx.ctraderSignIns` links cTrader accounts without the dashboard:
+  `create({ returnUrl })` (`CtraderSignInStarted` with `authorizeUrl`),
+  `get()` (`CtraderSignIn` with the granted `CtraderSignInAccount` rows and
+  `linkableAccounts`), `wait()` (reads until the sign-in is no longer
+  pending, with `timeoutMs`, `intervalMs` and `signal`) and
+  `linkAccounts()` (up to 50, one `CtraderLinkResult` per account).
+  `CtraderSignInStatus` lists the statuses.
+- Errors for the sign-in routes: `SignInLimitError` (429, a `RateLimitError`
+  with `retryAfter` and `limit`), `SignInNotCompletedError` (409, with
+  `signInStatus`), `SignInExpiredError` (410), `CtraderReauthRequiredError`
+  (409) and `CtraderAccountNotInSignInError` (400, a `ValidationError` with
+  `ctraderAccountIds`).
+- `Account.reauthRequired` (cTrader: the sign-in was revoked) and
+  `Account.suspended` (billing suspended the account).
+- `orderSend({ trailingStop, guaranteedStopLoss })` and the same on
+  `orderModify` (omitted keeps them), cTrader only. Both need a `stopLoss`;
+  the SDK throws `ValidationError` before sending otherwise.
+- `orderModify(ticket, { clientOrderId })` and
+  `orderClose(ticket, { clientOrderId })` on cTrader: one set of ids with
+  `orderSend`, so a modify or partial close that timed out can be sent again
+  safely.
+- `journal({ limit, since, kind })` on the terminal client, cTrader only,
+  with the new `JournalEntry` type and `JournalKind` enum.
+- `OpenedOrder.trailingStop` / `.guaranteedStopLoss` and the same on
+  `PendingOrder` (so on the `positions` and `orders` stream frames too),
+  `AccountInfo.limitedRisk`, `SymbolInfo.guaranteedStopLoss` and
+  `.gslDistance`. `false` / `0` on MT4 and MT5.
+- Order legs and defaults of `fx.orders.send()` take `trailingStop` and
+  `guaranteedStopLoss`, checked for a `stopLoss` before sending. An MT4 or
+  MT5 leg with either set to `true` fails the batch at the API
+  (`invalid_batch`).
+
+### Changed
+
+- On MT4 and MT5, `journal()`, `trailingStop: true`,
+  `guaranteedStopLoss: true` and `clientOrderId` on `orderModify` /
+  `orderClose` throw `UnsupportedOnPlatformError` before sending, since the
+  MT terminals would ignore them. `false` for a stop loss kind is simply not
+  sent there.
+- `accounts.create()` and `privateServers.addAccount()` with
+  `platform: 'ctrader'` now point to `fx.ctraderSignIns` instead of the
+  dashboard.
+- `Account`, `AccountInfo`, `OpenedOrder`, `PendingOrder` and `SymbolInfo`
+  have new required fields, so code that builds these objects by hand (in
+  tests, say) needs them added.
+
 ## [0.11.0] - 2026-11-20
 
 Matches [FxSocket Python SDK](https://github.com/fxsocket-com/FxSocket-Python-SDK)

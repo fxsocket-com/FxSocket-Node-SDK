@@ -10,6 +10,7 @@
 
 import {
   Execution,
+  JournalKind,
   OrderOperation,
   PENDING_OPERATIONS,
   STOP_LIMIT_OPERATIONS,
@@ -76,14 +77,16 @@ export function coerceTimeframe(value: TimeframeInput): Timeframe {
 
 /**
  * Validate the platform of a password link, the way the API's enum does.
- * cTrader has no password link: its accounts are linked from the dashboard
- * with a cTrader ID sign-in, and the API refuses them (HTTP 400).
+ * cTrader has no password link: its accounts are linked with a cTrader
+ * sign-in, and the API refuses them (HTTP 400).
  */
 export function coercePlatform(value: unknown): Platform {
   if (value === 'mt4' || value === 'mt5') return value;
   if (value === 'ctrader') {
     throw new ValidationError(
-      'cTrader accounts are linked from the FxSocket dashboard (sign in with cTrader), not through the API',
+      'cTrader accounts are linked with a cTrader sign-in, not a password: start one ' +
+        'with client.ctraderSignIns.create(), then link the accounts the user grants ' +
+        'with client.ctraderSignIns.linkAccounts()',
     );
   }
   throw new ValidationError(`platform must be one of mt4, mt5, got ${inspect(value)}`);
@@ -211,6 +214,126 @@ export function validateManualOrder(
   ) {
     throw new ValidationError('execution Manual takes no stopLimitPrice, expiration');
   }
+}
+
+function platformLabel(platform: Platform): string {
+  return platform === 'ctrader' ? 'cTrader' : platform.toUpperCase();
+}
+
+/**
+ * cTrader's stop loss kinds, as they go on the wire.
+ *
+ * On MT4 / MT5 `true` is refused (the platform has no such stop loss) and
+ * `false` is dropped: every MT stop loss is fixed and not guaranteed already,
+ * and the MT terminals would ignore the field.
+ */
+export function resolveStopKinds(
+  platform: Platform,
+  fields: { trailingStop?: boolean; guaranteedStopLoss?: boolean },
+): { trailingStop?: boolean; guaranteedStopLoss?: boolean } {
+  for (const field of ['trailingStop', 'guaranteedStopLoss'] as const) {
+    const value = fields[field];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new ValidationError(`${field} must be a boolean, got ${inspect(value)}`);
+    }
+  }
+  if (platform === 'ctrader') {
+    return {
+      trailingStop: fields.trailingStop,
+      guaranteedStopLoss: fields.guaranteedStopLoss,
+    };
+  }
+  for (const field of ['trailingStop', 'guaranteedStopLoss'] as const) {
+    if (fields[field] === true) {
+      throw new UnsupportedOnPlatformError(
+        `${field} is only supported on cTrader, not on ${platformLabel(platform)}`,
+      );
+    }
+  }
+  return {};
+}
+
+/**
+ * A trailing or guaranteed stop loss needs a stop loss (the terminal and the
+ * batch API answer 400 otherwise).
+ */
+export function requireStopLossForStopKinds(fields: {
+  trailingStop?: unknown;
+  guaranteedStopLoss?: unknown;
+  stopLoss?: unknown;
+}): void {
+  if (
+    (fields.trailingStop === true || fields.guaranteedStopLoss === true) &&
+    !(typeof fields.stopLoss === 'number' && fields.stopLoss > 0)
+  ) {
+    throw new ValidationError('trailingStop and guaranteedStopLoss need a stopLoss');
+  }
+}
+
+/**
+ * `clientOrderId` on `orderModify` / `orderClose`: cTrader only (the MT
+ * terminals would ignore it, so a retry would not be safe).
+ */
+export function ctraderClientOrderId(
+  platform: Platform,
+  value: unknown,
+  call: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (platform !== 'ctrader') {
+    throw new UnsupportedOnPlatformError(
+      `clientOrderId on ${call} is only supported on cTrader, not on ${platformLabel(platform)}`,
+    );
+  }
+  return validateClientOrderId(value);
+}
+
+/** Most entries one `journal()` call returns. */
+export const MAX_JOURNAL_ENTRIES = 1000;
+
+/** Validate a `journal()` call and build its query, before anything is sent. */
+export function journalParams(
+  platform: Platform,
+  options: { limit?: number; since?: TimeInput; kind?: JournalKind },
+): Record<string, string | number | undefined> {
+  if (platform !== 'ctrader') {
+    throw new UnsupportedOnPlatformError(
+      `journal() is only served by cTrader terminals, not by ${platformLabel(platform)}`,
+    );
+  }
+  const { limit, since, kind } = options;
+  if (
+    limit !== undefined &&
+    !(Number.isInteger(limit) && limit >= 1 && limit <= MAX_JOURNAL_ENTRIES)
+  ) {
+    throw new ValidationError(
+      `limit must be a whole number 1-${MAX_JOURNAL_ENTRIES}, got ${inspect(limit)}`,
+    );
+  }
+  let kindValue: JournalKind | undefined;
+  if (kind !== undefined) {
+    const norm = String(kind).trim().toLowerCase();
+    kindValue = Object.values(JournalKind).find((k) => k === norm);
+    if (kindValue === undefined) {
+      throw new ValidationError(
+        `Unknown journal kind: ${inspect(kind)} (connection or trade)`,
+      );
+    }
+  }
+  return compact({ limit, since: formatSinceUtc(since), kind: kindValue });
+}
+
+/**
+ * Serialize a journal `since`. A `Date` is rendered in UTC with milliseconds
+ * (`2026-11-22T21:00:00.000Z`); a string passes through verbatim.
+ */
+export function formatSinceUtc(value: TimeInput | undefined): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!(value instanceof Date)) return String(value);
+  if (Number.isNaN(value.getTime())) {
+    throw new ValidationError('an invalid Date cannot be sent as a timestamp');
+  }
+  return value.toISOString();
 }
 
 /** Longest `clientOrderId` the terminal accepts, in characters. */

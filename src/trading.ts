@@ -41,6 +41,7 @@ import {
   formatTime,
   rejectUnknownKeys,
   requireInteger,
+  requireStopLossForStopKinds,
   validateOrderSend,
 } from './validate.js';
 
@@ -59,6 +60,8 @@ const ORDER_FIELDS = [
   'comment',
   'magic',
   'expertId',
+  'trailingStop',
+  'guaranteedStopLoss',
 ] as const;
 
 const ORDER_DEFAULT_KEYS: ReadonlySet<string> = new Set(ORDER_FIELDS);
@@ -161,6 +164,13 @@ function orderFieldsPayload(
   for (const field of ['slippage', 'magic', 'expertId'] as const) {
     if (fields[field] !== undefined) requireInteger(fields[field], where, field);
   }
+  for (const field of ['trailingStop', 'guaranteedStopLoss'] as const) {
+    if (fields[field] !== undefined && typeof fields[field] !== 'boolean') {
+      throw new ValidationError(
+        `${where}: ${field} must be a boolean, got ${String(fields[field])}`,
+      );
+    }
+  }
 
   return compact({
     symbol: fields.symbol,
@@ -174,6 +184,8 @@ function orderFieldsPayload(
     expiration: formatTime(fields.expiration),
     comment: fields.comment,
     expert_id: magic,
+    trailing_stop: fields.trailingStop,
+    guaranteed_stop_loss: fields.guaranteedStopLoss,
   });
 }
 
@@ -197,6 +209,11 @@ function validateEffectiveOrder(
       stopLimitPrice: effective['stop_limit_price'] as number | undefined,
       stopLoss: effective['stop_loss'] as number | undefined,
       takeProfit: effective['take_profit'] as number | undefined,
+    });
+    requireStopLossForStopKinds({
+      trailingStop: effective['trailing_stop'],
+      guaranteedStopLoss: effective['guaranteed_stop_loss'],
+      stopLoss: effective['stop_loss'],
     });
   } catch (error) {
     if (error instanceof ValidationError) {
@@ -456,6 +473,12 @@ export class Orders {
    * broker (`EURUSD` / `EURUSD.sd` / `EURUSDm`), so one `defaults` symbol
    * across mixed brokers will partly fail by design — that is what a leg-level
    * `symbol` is for.
+   *
+   * `trailingStop` and `guaranteedStopLoss` are cTrader only and need a
+   * `stopLoss`. The SDK does not know each leg's platform, so a leg for an MT4
+   * or MT5 account with either set to `true` is refused by the API: the whole
+   * batch fails with {@link ValidationError} (`invalid_batch`) and nothing is
+   * sent.
    */
   async send(
     orders: Iterable<OrderLegInput>,

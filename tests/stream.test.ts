@@ -1013,7 +1013,11 @@ describe('parseEvent (0.17 frames)', () => {
     expect(orders.type).toBe('orders');
     if (orders.type === 'orders') {
       expect(orders.snapshot).toBe(true);
-      expect(orders.data[0]).toEqual(PENDING);
+      expect(orders.data[0]).toEqual({
+        ...PENDING,
+        trailingStop: false,
+        guaranteedStopLoss: false,
+      });
     }
 
     expect(
@@ -1351,6 +1355,8 @@ describe('trades resume across a reconnect', () => {
         login: 1,
         status: 'connected',
         error: '',
+        suspended: false,
+        reauthRequired: false,
         restUrl: 'https://term.test',
         wsUrl: 'wss://term.test/ws',
         proxyAddress: '',
@@ -1363,5 +1369,44 @@ describe('trades resume across a reconnect', () => {
       { resumeTrades: false },
     );
     expect((s as unknown as { resumeTrades: boolean }).resumeTrades).toBe(false);
+  });
+});
+
+describe('cTrader stop loss kinds on stream frames', () => {
+  it('decodes them on positions and orders frames', () => {
+    const positions = parseEvent({
+      type: 'positions',
+      data: [
+        {
+          ticket: 1,
+          symbol: 'EURUSD',
+          type: 'Buy',
+          kind: 'Position',
+          lots: 0.1,
+          stopLoss: 1.07,
+          trailingStop: true,
+        },
+      ],
+    });
+    expect(positions.type).toBe('positions');
+    if (positions.type === 'positions') {
+      expect(positions.data[0]).toMatchObject({
+        trailingStop: true,
+        guaranteedStopLoss: false,
+      });
+    }
+    const orders = parseEvent({
+      type: 'orders',
+      data: [
+        { ticket: 2, symbol: 'EURUSD', type: 'BuyLimit', guaranteedStopLoss: true },
+      ],
+    });
+    expect(orders.type).toBe('orders');
+    if (orders.type === 'orders') {
+      expect(orders.data[0]).toMatchObject({
+        trailingStop: false,
+        guaranteedStopLoss: true,
+      });
+    }
   });
 });

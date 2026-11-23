@@ -151,7 +151,7 @@ describe('accounts.create', () => {
         password: 'pw',
         platform: 'ctrader',
       }),
-    ).rejects.toThrow(/dashboard/);
+    ).rejects.toThrow(/ctraderSignIns/);
     expect(route.called).toBe(false);
     await fx.close();
   });

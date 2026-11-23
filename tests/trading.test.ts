@@ -422,6 +422,72 @@ describe('orders.send', () => {
   });
 });
 
+describe('orders.send cTrader stop loss kinds', () => {
+  const defaults = { symbol: 'EURUSD', operation: 'Buy', volume: 0.1 } as const;
+
+  it('sends trailingStop and guaranteedStopLoss as snake_case', async () => {
+    const route = mock.post('/v1/orders', { status: 200, json: ORDER_RESPONSE });
+    const fx = client();
+    await fx.orders.send(
+      [
+        { accountId: A1, trailingStop: true },
+        { accountId: A2, guaranteedStopLoss: true, stopLoss: 1.06 },
+      ],
+      { defaults: { ...defaults, stopLoss: 1.07 } },
+    );
+    expect(route.sent['orders']).toEqual([
+      { account_id: A1, trailing_stop: true },
+      { account_id: A2, stop_loss: 1.06, guaranteed_stop_loss: true },
+    ]);
+    await fx.close();
+  });
+
+  it.each([
+    [{ accountId: A1, trailingStop: true }],
+    [{ accountId: A1, guaranteedStopLoss: true, stopLoss: 0 }],
+  ])('needs a stop loss before sending (%o)', async (leg) => {
+    const route = mock.post('/v1/orders', { status: 200, json: ORDER_RESPONSE });
+    const fx = client();
+    await expect(fx.orders.send([leg], { defaults })).rejects.toThrow(/stopLoss/);
+    expect(route.called).toBe(false);
+    await fx.close();
+  });
+
+  it('takes false without a stop loss and rejects a non-boolean', async () => {
+    const route = mock.post('/v1/orders', { status: 200, json: ORDER_RESPONSE });
+    const fx = client();
+    await fx.orders.send([{ accountId: A1, trailingStop: false }], { defaults });
+    expect(route.sent['orders']).toEqual([{ account_id: A1, trailing_stop: false }]);
+    await expect(
+      fx.orders.send(
+        [{ accountId: A1, guaranteedStopLoss: 'yes' as unknown as boolean }],
+        {
+          defaults,
+        },
+      ),
+    ).rejects.toThrow(ValidationError);
+    await fx.close();
+  });
+
+  it('surfaces the API refusing a stop loss kind on an MT leg', async () => {
+    mock.post('/v1/orders', {
+      status: 400,
+      json: {
+        error: 'invalid_batch',
+        detail: 'Some legs are invalid.',
+        errors: { '0': ['trailing_stop is cTrader only'] },
+      },
+    });
+    const fx = client();
+    await expect(
+      fx.orders.send([{ accountId: A1, trailingStop: true, stopLoss: 1.07 }], {
+        defaults,
+      }),
+    ).rejects.toMatchObject({ constructor: ValidationError, code: 'invalid_batch' });
+    await fx.close();
+  });
+});
+
 // --------------------------------------------------------------------------- //
 // close
 // --------------------------------------------------------------------------- //

@@ -11,10 +11,10 @@
  */
 
 /**
- * Trading platform of a linked account. cTrader accounts are linked from the
- * dashboard (a cTrader ID sign-in, no password), not through
- * `accounts.create`; once linked they are listed, traded and streamed like MT4
- * and MT5 accounts.
+ * Trading platform of a linked account. cTrader accounts are linked with a
+ * cTrader sign-in, not a password: from the dashboard, or through the API with
+ * `client.ctraderSignIns` (not `accounts.create`). Once linked they are listed,
+ * traded and streamed like MT4 and MT5 accounts.
  */
 export const Platform = {
   MT4: 'mt4',
@@ -308,6 +308,32 @@ export const Execution = {
 export type Execution = (typeof Execution)[keyof typeof Execution];
 /** An {@link Execution}, or the same value in any letter case. */
 export type ExecutionInput = Execution | (string & {});
+
+/** `kind` of a cTrader `/Journal` entry (`journal({ kind })`). */
+export const JournalKind = {
+  /** The account's link to cTrader: signed in, ready, connection lost, ... */
+  CONNECTION: 'connection',
+  /** A trade request and its outcome. */
+  TRADE: 'trade',
+} as const;
+export type JournalKind = (typeof JournalKind)[keyof typeof JournalKind];
+
+/**
+ * `status` of a cTrader API sign-in (`client.ctraderSignIns`).
+ *
+ * `PENDING` until the user comes back from cTrader's consent page, then
+ * `COMPLETED`, `DENIED` (the user declined) or `FAILED`. A pending or
+ * completed sign-in past its `expiresAt` reads `EXPIRED`.
+ */
+export const CtraderSignInStatus = {
+  PENDING: 'pending',
+  COMPLETED: 'completed',
+  DENIED: 'denied',
+  EXPIRED: 'expired',
+  FAILED: 'failed',
+} as const;
+export type CtraderSignInStatus =
+  (typeof CtraderSignInStatus)[keyof typeof CtraderSignInStatus];
 
 /** Roll-up status reported by the terminal `/status` endpoint. */
 export const HealthStatus = {

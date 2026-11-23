@@ -1,8 +1,9 @@
 /**
  * FxSocket Node.js / TypeScript SDK.
  *
- * Account management, multi-account trading and the wallet (the v1 API), plus
- * per-account terminal REST and WebSocket streaming for MT4/MT5.
+ * Account management, cTrader sign-in, multi-account trading and the wallet (the
+ * v1 API), plus per-account terminal REST and WebSocket streaming for MT4, MT5
+ * and cTrader.
  *
  * ```ts
  * import { FxSocket } from '@fxsocket/sdk';
@@ -46,6 +47,16 @@ export {
 } from './management/accounts.js';
 
 export {
+  CtraderSignIns,
+  linkAccountsPayload,
+  MAX_LINK_ACCOUNTS,
+  signInIdOf,
+  type CreateSignInParams,
+  type SignInRef,
+  type WaitSignInOptions,
+} from './management/ctrader-sign-ins.js';
+
+export {
   PrivateServers,
   privateServerIdOf,
   type AddPrivateAccountParams,
@@ -70,6 +81,7 @@ export {
   type AccountEvent,
   type BarEvent,
   type CloseAllParams,
+  type JournalParams,
   type ModifyEvent,
   type OrderCloseParams,
   type OrderEventMessage,
@@ -102,8 +114,10 @@ export {
   coerceOperation,
   coerceTimeframe,
   formatTime,
+  formatSinceUtc,
   formatUtcTime,
   MAX_BULK_SYMBOLS,
+  MAX_JOURNAL_ENTRIES,
 } from './validate.js';
 
 export {
@@ -111,10 +125,12 @@ export {
   CloseLegStatus,
   ClosedTicketStatus,
   CloseSide,
+  CtraderSignInStatus,
   DealEntry,
   Execution,
   ExpirationMode,
   HealthStatus,
+  JournalKind,
   KeyScope,
   MT5_ONLY_TIMEFRAMES,
   OrderEventKind,
@@ -147,6 +163,8 @@ export {
   ClientOrderIdReusedError,
   ConnectFailedError,
   ConnectionError,
+  CtraderAccountNotInSignInError,
+  CtraderReauthRequiredError,
   DuplicateAccountError,
   errorFromResponse,
   ForbiddenError,
@@ -162,6 +180,9 @@ export {
   RateLimitError,
   SeatLapsedError,
   ServerLimitError,
+  SignInExpiredError,
+  SignInLimitError,
+  SignInNotCompletedError,
   SlotsFullError,
   StreamError,
   TerminalNotReadyError,
@@ -198,9 +219,15 @@ export type {
   CloseLegResult,
   CommissionRule,
   CommissionTier,
+  CtraderAccountInput,
+  CtraderLinkResult,
+  CtraderSignIn,
+  CtraderSignInAccount,
+  CtraderSignInStarted,
   Health,
   HealthChecks,
   HistoryTrade,
+  JournalEntry,
   MarginCalc,
   OpenedOrder,
   OrderDefaults,

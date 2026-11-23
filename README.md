@@ -12,7 +12,7 @@ stream live updates over REST and WebSocket.
 ## Features
 
 - **Account management** — link, list, fetch, and disconnect MT4/MT5 accounts;
-  list and disconnect cTrader accounts (those are linked from the dashboard).
+  link cTrader accounts with a cTrader sign-in.
 - **Private servers** — buy, resize, cancel and delete dedicated hosting
   servers, and manage the accounts on them.
 - **Read-only keys** — mint, scope, rotate and revoke `fxs_ro_…` keys for
@@ -236,10 +236,11 @@ of resting as a limit, so on those accounts `BuyStopLimit` / `SellStopLimit` (or
 a `stopLimitPrice` on `orderModify`) throws `UnsupportedOnPlatformError` before
 anything is sent.
 
-cTrader accounts are linked from the FxSocket dashboard with a cTrader ID
-sign-in, so `accounts.create({ platform: 'ctrader', ... })` throws
-`ValidationError`. Once linked, a cTrader account is listed, traded and streamed
-like any other: its `restUrl` is `https://api.fxsocket.com/ctrader/<account id>`.
+cTrader accounts have no password, so `accounts.create({ platform: 'ctrader', ... })`
+throws `ValidationError`. Link them with a cTrader sign-in instead (see
+[cTrader](#ctrader)). Once linked, a cTrader account is listed, traded and
+streamed like any other: its `restUrl` is
+`https://api.fxsocket.com/ctrader/<account id>`.
 
 The features below need a terminal on bridge MT5 0.17.0 / MT4 0.15.0 or newer
 (`(await terminal.status()).bridge.version`). On older bridges the new fields
@@ -338,6 +339,138 @@ const { symbols, errors } = await terminal.symbolInfos(['EURUSD', 'NOPE']);
 > On MT4 the opposite failure also exists: a bounded request (or the `D1`
 > timeframe) can fail server-side with `CopyRates failed` when the terminal
 > hasn't loaded that history yet. Retry after the chart has warmed up.
+
+## cTrader
+
+### Linking accounts with a sign-in
+
+cTrader accounts are linked through the user's own cTrader ID, not a password.
+Start a sign-in, send the user's browser to `authorizeUrl` (cTrader's consent
+page), wait until they are done, then link the accounts they granted:
+
+```ts
+const started = await fx.ctraderSignIns.create({
+  returnUrl: 'https://app.example.com/ctrader/done', // optional
+});
+redirectUserTo(started.authorizeUrl); // a redirect or a new tab, no iframe
+
+const signIn = await fx.ctraderSignIns.wait(started); // reads until no longer pending
+if (signIn.status !== 'completed') {
+  throw new Error(`cTrader sign-in ${signIn.status}: ${signIn.error}`);
+}
+
+for (const row of signIn.accounts) {
+  console.log(
+    row.ctraderAccountId,
+    row.login,
+    row.broker,
+    row.live,
+    row.unavailableReason,
+  );
+}
+
+const results = await fx.ctraderSignIns.linkAccounts(
+  signIn,
+  signIn.linkableAccounts.map((a) => ({
+    ctraderAccountId: a.ctraderAccountId,
+    nickname: 'Main',
+  })),
+);
+for (const r of results) {
+  if (r.isLinked) console.log('linked', r.account!.id, r.account!.status);
+  else console.log('refused', r.ctraderAccountId, r.error, r.detail);
+}
+```
+
+- The user has 10 minutes for the consent page. After it the browser goes to
+  `returnUrl` with `fxsocket_sign_in=<id>&status=<status>` added, or to an
+  FxSocket page that asks them to return to your app. A `returnUrl` must be
+  https (http only for localhost) on an origin FxSocket has allowed for you;
+  ask support to add yours.
+- `wait()` reads the sign-in every 2 seconds for up to 11 minutes
+  (`intervalMs`, `timeoutMs`, and an optional `signal` to stop it) and resolves
+  as soon as it is `completed`, `denied`, `failed` or `expired`, or still
+  `pending` when the timeout ran out. Check `status`. You can also call `get()`
+  yourself when the browser comes back.
+- `linkAccounts()` takes up to 50 accounts: ids, rows of `signIn.accounts`, or
+  objects with `ctraderAccountId` and an optional `nickname`. It resolves to
+  one `CtraderLinkResult` per account, in order, with the same plan, seat and
+  duplicate rules as `accounts.create()`. Linking works for 60 minutes after
+  the user came back, and a repeat of the same call is safe.
+- At most 20 sign-ins may wait at once and 60 may be started per hour, else
+  `SignInLimitError` (a `RateLimitError` with `retryAfter` and `limit`).
+- All of this needs the full key. Whoever holds it and gets someone to allow
+  access gets trading access to their cTrader accounts, so keep the key on your
+  server.
+
+An account whose access was revoked in the user's cTrader ID settings reads
+`account.reauthRequired === true` and stays down until its owner signs in again.
+
+### Trading extras
+
+cTrader has its own stop loss kinds. `trailingStop: true` makes the stop loss
+trail the price, `guaranteedStopLoss: true` makes it guaranteed (filled at its
+level even through a gap, for a fee) where the broker offers it. Both need a
+`stopLoss`:
+
+```ts
+const term = fx.terminal(account); // a cTrader account
+
+await term.orderSend({
+  symbol: 'EURUSD',
+  operation: 'Buy',
+  volume: 0.1,
+  stopLoss: 1.075,
+  trailingStop: true,
+});
+await term.orderModify(ticket, { trailingStop: false }); // omitted keeps it
+
+const spec = await term.symbolInfo('EURUSD');
+console.log(spec.guaranteedStopLoss, spec.gslDistance); // offered? least distance
+console.log((await term.accountInfo()).limitedRisk); // guaranteed stop loss on every order
+```
+
+On a limited-risk account every order gets a guaranteed stop loss by default
+and needs a `stopLoss`. `openedOrders()` and `pendingOrders()` rows (and the
+`positions` and `orders` stream frames) say `trailingStop` and
+`guaranteedStopLoss`.
+
+`orderModify` and `orderClose` take a `clientOrderId` too, so a modify or a
+partial close that timed out can be sent again with the same id. The ids of
+send, modify and close are one set: a repeat answers with the first outcome
+(`idempotentReplayed`), and an id reused for a different request throws
+`ClientOrderIdReusedError`.
+
+### Journal
+
+`journal()` lists the account's connection events (signed in, ready, connection
+lost and back, token refreshed or refused) and every trade request with its
+request, outcome, duration, `clientOrderId`, `User-Agent` and client address,
+newest first:
+
+```ts
+const since = new Date(Date.now() - 60 * 60 * 1000);
+for (const entry of await term.journal({ kind: 'trade', since, limit: 200 })) {
+  console.log(
+    entry.time,
+    entry.event,
+    entry.message,
+    entry.clientOrderId,
+    entry.result,
+  );
+}
+```
+
+`limit` is 1 to 1000 (100 by default). The journal lives in the bridge's
+memory: the newest 1000 entries of at most 7 days, and a bridge restart empties
+it. Use `orderHistory()` for the full record.
+
+These are cTrader only. On MT4 and MT5 `journal()`, `trailingStop: true`,
+`guaranteedStopLoss: true` and a `clientOrderId` on `orderModify` /
+`orderClose` throw `UnsupportedOnPlatformError` before anything is sent. In
+`fx.orders.send()` legs the stop loss kinds work the same way, but the SDK does
+not know each leg's platform there, so an MT4 or MT5 leg with either set to
+`true` fails the whole batch at the API (`ValidationError`, `invalid_batch`).
 
 ## Multi-account trading
 
@@ -595,7 +728,9 @@ Every failure rejects with a subclass of `FxSocketError`:
 | `AuthError`                        | missing/invalid API key                                             |
 | `ForbiddenError`                   | key not allowed to do this (read-only key on a mutating call)       |
 | `RateLimitError`                   | rate limited (`.retryAfter`)                                        |
+| `SignInLimitError`                 | too many cTrader sign-ins (`.retryAfter`, `.limit`)                 |
 | `ValidationError`                  | malformed request (`.code`: `invalid_batch`, `unknown_account`, …)  |
+| `CtraderAccountNotInSignInError`   | linking an account the sign-in did not grant (`.ctraderAccountIds`) |
 | `IdempotencyError`                 | batch refused because of its `Idempotency-Key` (`.code`)            |
 | `NotFoundError`                    | account/resource not found                                          |
 | `PaymentRequiredError`             | base for every 402 below (plan / balance doesn't allow it)          |
@@ -610,12 +745,15 @@ Every failure rejects with a subclass of `FxSocketError`:
 | `AlreadyLapsedError`               | the paid period ran out — a cancel can no longer be resumed         |
 | `NotBalanceFundedError`            | card-/crypto-funded server (a `ForbiddenError`) — use the dashboard |
 | `ConnectFailedError`               | broker rejected the login                                           |
+| `SignInNotCompletedError`          | linking from a sign-in that is not completed (`.signInStatus`)      |
+| `SignInExpiredError`               | linking from a sign-in that has expired                             |
+| `CtraderReauthRequiredError`       | cTrader no longer accepts the sign-in; start a new one              |
 | `TerminalNotReadyError`            | terminal not provisioned / not ready, or no trade EA to take orders |
 | `TerminalTimeoutError`             | the terminal didn't answer in time (base of the two below)          |
 | `TradeOutcomeUnknownError`         | a trade timed out after the terminal took it: it may have executed  |
 | `TradeAbandonedError`              | a trade never reached the terminal: safe to send again              |
 | `ClientOrderIdReusedError`         | `clientOrderId` already used for a different order                  |
-| `UnsupportedOnPlatformError`       | feature not available on this platform (MT4 stop-limit orders)      |
+| `UnsupportedOnPlatformError`       | feature not available on this platform (MT4 stop-limit, MT journal) |
 | `StreamError`                      | WebSocket dropped, or could not be opened                           |
 | `ConnectionError` / `TimeoutError` | the request never completed                                         |
 
@@ -849,6 +987,7 @@ The two SDKs cover the same API and the same concepts. What differs:
 | `snake_case` methods and fields            | `camelCase`                                         |
 | keyword arguments                          | a single options object                             |
 | `fx.readonly_keys`                         | `fx.readonlyKeys`                                   |
+| `fx.ctrader_sign_ins.wait(si, timeout=60)` | `fx.ctraderSignIns.wait(si, { timeoutMs: 60_000 })` |
 | `term.order_history(from_, to)`            | `term.orderHistory({ from, to })`                   |
 | `Tick`, `Bar`, `AccountUpdate`, … classes  | one union discriminated on `event.type`             |
 | `result.is_filled`, `account.has_terminal` | the same names in camelCase, as plain fields        |

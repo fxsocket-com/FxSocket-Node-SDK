@@ -1,5 +1,5 @@
 /**
- * Per-account terminal REST client (MT4 + MT5).
+ * Per-account terminal REST client (MT4, MT5 and cTrader).
  *
  * One {@link TerminalClient} is bound to a single account's terminal endpoint
  * (`Account.restUrl`).
@@ -15,6 +15,15 @@
  * see `validate.ts`. No request is auto-retried: order send/modify/close must
  * never replay, to avoid duplicate fills. Send orders with a `clientOrderId`
  * to make a deliberate retry safe.
+ *
+ * cTrader accounts (bridge 0.1.6) add a few things MT4 and MT5 do not have:
+ * `trailingStop` and `guaranteedStopLoss` on `orderSend` and `orderModify`
+ * (cTrader's own stop loss kinds, both need a stop loss), `clientOrderId` on
+ * `orderModify` and `orderClose` too (one set of ids with `orderSend`), and
+ * {@link TerminalClient.journal}. The client knows the account's platform, so
+ * on MT4 and MT5 these throw {@link UnsupportedOnPlatformError} before anything
+ * is sent. `trailingStop: false` and `guaranteedStopLoss: false` are not sent
+ * there, since every MT stop loss is already a fixed, normal one.
  */
 
 import type { Dispatcher } from 'undici';
@@ -27,6 +36,7 @@ import {
   decodeHealth,
   decodeHealthChecks,
   decodeHistoryTrade,
+  decodeJournal,
   decodeList,
   decodeMarginCalc,
   decodeOpenedOrder,
@@ -42,6 +52,7 @@ import {
 } from '../decode.js';
 import type {
   ExecutionInput,
+  JournalKind,
   OrderOperationInput,
   Platform,
   TimeframeInput,
@@ -57,6 +68,7 @@ import type {
   Health,
   HealthChecks,
   HistoryTrade,
+  JournalEntry,
   MarginCalc,
   OpenedOrder,
   OrderResult,
@@ -75,11 +87,15 @@ import {
   coerceOperation,
   coerceTimeframe,
   compact,
+  ctraderClientOrderId,
   formatTime,
+  journalParams,
   rejectUnsupportedOnPlatform,
   requirePositiveVolume,
+  requireStopLossForStopKinds,
   resolveExpiration,
   resolveModifyStops,
+  resolveStopKinds,
   validateClientOrderId,
   validateManualOrder,
   validateOrderSend,
@@ -152,6 +168,19 @@ export interface OrderSendParams {
    * ignore it and send the order the normal way.
    */
   execution?: ExecutionInput;
+  /**
+   * cTrader only: `true` makes the stop loss a trailing stop, which follows the
+   * price at the distance it was placed at. Needs `stopLoss`.
+   */
+  trailingStop?: boolean;
+  /**
+   * cTrader only: `true` makes the stop loss guaranteed (filled at its level
+   * even through a gap, for a fee) where the broker offers it
+   * (`symbolInfo().guaranteedStopLoss`). Needs `stopLoss`. On a limited-risk
+   * account (`accountInfo().limitedRisk`) every order gets one by default and
+   * needs a `stopLoss`.
+   */
+  guaranteedStopLoss?: boolean;
 }
 
 export interface OrderModifyParams {
@@ -171,6 +200,23 @@ export interface OrderModifyParams {
   clearStopLoss?: boolean;
   /** Remove the take-profit. Cannot be combined with `takeProfit`. */
   clearTakeProfit?: boolean;
+  /**
+   * cTrader only: `true` turns the stop loss into a trailing stop, `false` back
+   * into a fixed one. Omit to keep it. Removing the stop loss drops it.
+   */
+  trailingStop?: boolean;
+  /**
+   * cTrader only: `true` makes the stop loss guaranteed, `false` a normal one.
+   * Omit to keep it.
+   */
+  guaranteedStopLoss?: boolean;
+  /**
+   * cTrader only: your id for this change (1-64 characters). The ids of send,
+   * modify and close are one set: a repeat within 10 minutes changes nothing
+   * and answers with the first outcome (`idempotentReplayed`), and reusing an
+   * id for a different request throws {@link ClientOrderIdReusedError}.
+   */
+  clientOrderId?: string;
 }
 
 export interface OrderCloseParams {
@@ -186,6 +232,24 @@ export interface OrderCloseParams {
    * the flag and close the position, so check `status().bridge.version`.
    */
   pendingOnly?: boolean;
+  /**
+   * cTrader only: your id for this close (1-64 characters, one set with
+   * `orderSend`'s). A repeat closes nothing more and answers with the first
+   * outcome, so a partial close that timed out can be sent again safely.
+   */
+  clientOrderId?: string;
+}
+
+export interface JournalParams {
+  /** Most entries to return, newest first: 1-1000 (the terminal's default is 100). */
+  limit?: number;
+  /**
+   * Only entries at or after this moment, in UTC: a `Date`, or a string such
+   * as `2026-11-22T21:00:00Z`.
+   */
+  since?: TimeInput;
+  /** `connection` or `trade` (see {@link JournalKind}); omit for both. */
+  kind?: JournalKind;
 }
 
 export interface CloseAllParams {
@@ -270,6 +334,23 @@ export class TerminalClient {
   /** Broker server clock and its UTC offset. */
   async serverTimezone(): Promise<ServerTimezone> {
     return decodeServerTimezone(await this.http.request('GET', '/ServerTimezone'));
+  }
+
+  /**
+   * The account's journal, newest first (`GET /Journal`). cTrader only (bridge
+   * 0.1.6): on MT4 / MT5 this throws {@link UnsupportedOnPlatformError}.
+   *
+   * Connection entries say when the account signed in at cTrader, became ready,
+   * lost and regained its connection, and when its token was refreshed or
+   * refused. Trade entries hold every send, modify, close and close-all with
+   * its request, outcome, duration, `clientOrderId`, `User-Agent` and client
+   * address. The journal lives in the bridge's memory: the newest 1000 entries
+   * of at most 7 days, emptied when the bridge restarts. Use
+   * {@link TerminalClient.orderHistory} for the full record.
+   */
+  async journal(params: JournalParams = {}): Promise<JournalEntry[]> {
+    const query = journalParams(this.platform, params);
+    return decodeJournal(await this.http.request('GET', '/Journal', { params: query }));
   }
 
   // -- market data -------------------------------------------------------- //
@@ -418,6 +499,8 @@ export class TerminalClient {
     if (execution === 'Manual') {
       validateManualOrder(this.platform, operation, params);
     }
+    const stopKinds = resolveStopKinds(this.platform, params);
+    requireStopLossForStopKinds({ ...stopKinds, stopLoss: params.stopLoss });
     const clientOrderId = validateClientOrderId(params.clientOrderId);
     const { expiration, expirationUtc } = resolveExpiration(params);
     const body = compact({
@@ -435,6 +518,8 @@ export class TerminalClient {
       expertId: params.magic,
       clientOrderId,
       execution,
+      trailingStop: stopKinds.trailingStop,
+      guaranteedStopLoss: stopKinds.guaranteedStopLoss,
     });
     return this.trade('/OrderSend', body);
   }
@@ -445,6 +530,9 @@ export class TerminalClient {
    * A literal `stopLoss: 0` would *remove* the stop-loss, so it is rejected —
    * pass `clearStopLoss: true` to remove one deliberately, while omitting the
    * field keeps the current value.
+   *
+   * On cTrader `trailingStop`, `guaranteedStopLoss` and `clientOrderId` apply
+   * too (see {@link OrderModifyParams}).
    */
   async orderModify(
     ticket: number,
@@ -453,7 +541,21 @@ export class TerminalClient {
     rejectUnsupportedOnPlatform(this.platform, {
       stopLimitPrice: params.stopLimitPrice,
     });
+    const stopKinds = resolveStopKinds(this.platform, params);
+    const clientOrderId = ctraderClientOrderId(
+      this.platform,
+      params.clientOrderId,
+      'orderModify',
+    );
     const { stopLoss, takeProfit } = resolveModifyStops(params);
+    if (
+      params.clearStopLoss === true &&
+      (stopKinds.trailingStop === true || stopKinds.guaranteedStopLoss === true)
+    ) {
+      throw new ValidationError(
+        'trailingStop and guaranteedStopLoss need a stop loss; clearStopLoss removes it',
+      );
+    }
     const { expiration, expirationUtc } = resolveExpiration(params);
     const body = compact({
       ticket,
@@ -463,11 +565,17 @@ export class TerminalClient {
       stopLimitPrice: params.stopLimitPrice,
       expiration,
       expirationUtc,
+      trailingStop: stopKinds.trailingStop,
+      guaranteedStopLoss: stopKinds.guaranteedStopLoss,
+      clientOrderId,
     });
     return this.trade('/OrderModify', body);
   }
 
-  /** Close a position, or delete a pending order, by ticket. */
+  /**
+   * Close a position, or delete a pending order, by ticket. On cTrader a
+   * `clientOrderId` makes the close safe to repeat.
+   */
   async orderClose(
     ticket: number,
     params: OrderCloseParams = {},
@@ -475,11 +583,17 @@ export class TerminalClient {
     if (params.volume !== undefined && params.volume < 0) {
       throw new ValidationError(`volume must be >= 0, got ${params.volume}`);
     }
+    const clientOrderId = ctraderClientOrderId(
+      this.platform,
+      params.clientOrderId,
+      'orderClose',
+    );
     const body = compact({
       ticket,
       volume: params.volume,
       slippage: params.slippage,
       pendingOnly: params.pendingOnly === true ? true : undefined,
+      clientOrderId,
     });
     return this.trade('/OrderClose', body);
   }
